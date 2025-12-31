@@ -1,0 +1,44 @@
+{
+    "file_chunks": [
+        {
+            "id": "main.py",
+            "type": "file",
+            "content": "main.py: Command-line entrypoint that reads an instructions file, initializes an Agent with its contents, prompts the user for a query, sends that query to the Agent, parses the Agent's JSON response, and writes the result to semantics.json.",
+            "metadata": {
+                "path": "main.py",
+                "language": "python",
+                "concepts": [
+                    "command-line",
+                    "file I/O",
+                    "JSON parsing",
+                    "agent",
+                    "user input",
+                    "serialization"
+                ]
+            }
+        }
+    ],
+    "code_unit_chunks": [
+        {
+            "id": "main",
+            "type": "function",
+            "content": "main: Program entry point. Reads a file path from sys.argv[1]; if the path exists, reads its contents (otherwise uses an empty string and prints an error). Constructs an Agent with the file content, prompts the user for a single-line input, sends that input to the Agent via agent.message(), parses the returned JSON, and writes the parsed data to a file named semantics.json. Takes no parameters and returns None.",
+            "metadata": {
+                "file": "main.py",
+                "signature": "def main():",
+                "calls": [
+                    "sys.argv",
+                    "print",
+                    "os.path.exists",
+                    "open",
+                    "Agent",
+                    "input",
+                    "agent.message",
+                    "json.loads",
+                    "json.dump"
+                ],
+                "called_by": []
+            }
+        }
+    ]
+}
