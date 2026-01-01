@@ -1,0 +1,16 @@
+# Cross-compilation targets for OpenAgent TUI
+
+# Windows MSVC (requires Visual Studio Build Tools)
+[target.x86_64-pc-windows-msvc]
+
+# Windows GNU (can cross-compile from Linux with mingw)
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+
+# macOS (requires macOS SDK for cross-compilation)
+[target.x86_64-apple-darwin]
+[target.aarch64-apple-darwin]
+
+# Linux
+[target.x86_64-unknown-linux-gnu]
+[target.aarch64-unknown-linux-gnu]
