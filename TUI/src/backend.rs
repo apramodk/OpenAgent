@@ -106,6 +106,27 @@ pub struct CodebaseInitStats {
     pub chunks_generated: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EmbeddingPoint {
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default, rename = "type")]
+    pub chunk_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RagEmbeddingsResponse {
+    #[serde(default)]
+    pub points: Vec<EmbeddingPoint>,
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodebaseInitResponse {
     #[serde(default)]
@@ -123,6 +144,36 @@ pub struct ChatResponse {
     pub response: String,
     #[serde(default)]
     pub tokens: Option<TokenStats>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelGetResponse {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelSetResponse {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub previous: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelListResponse {
+    #[serde(default)]
+    pub models: Vec<ModelInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -193,12 +244,22 @@ impl std::fmt::Display for BackendError {
 
 type PendingRequests = Arc<Mutex<HashMap<u64, Sender<Result<serde_json::Value, BackendError>>>>>;
 
+/// Stream event from the backend
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    Chunk(String),
+    Done { tokens: Option<TokenStats> },
+}
+
+type StreamSender = Arc<Mutex<Option<Sender<StreamEvent>>>>;
+
 pub struct Backend {
     child: Option<Child>,
     stdin: Option<ChildStdin>,
     request_id: u64,
     pending: PendingRequests,
     ready: bool,
+    stream_sender: StreamSender,
 }
 
 impl Backend {
@@ -209,6 +270,7 @@ impl Backend {
             request_id: 0,
             pending: Arc::new(Mutex::new(HashMap::new())),
             ready: false,
+            stream_sender: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -242,15 +304,16 @@ impl Backend {
 
         // Spawn reader thread
         let pending = Arc::clone(&self.pending);
+        let stream_sender = Arc::clone(&self.stream_sender);
         thread::spawn(move || {
-            Self::reader_loop(stdout, pending);
+            Self::reader_loop(stdout, pending, stream_sender);
         });
 
         self.ready = true;
         Ok(())
     }
 
-    fn reader_loop(stdout: ChildStdout, pending: PendingRequests) {
+    fn reader_loop(stdout: ChildStdout, pending: PendingRequests, stream_sender: StreamSender) {
         let reader = BufReader::new(stdout);
 
         for line in reader.lines() {
@@ -277,9 +340,24 @@ impl Backend {
                     };
                     let _ = sender.send(result);
                 }
-            } else if let Ok(_notification) = serde_json::from_str::<JsonRpcNotification>(&line) {
-                // Handle notifications (like server.ready)
-                // For now we just ignore them, but could emit events
+            } else if let Ok(notification) = serde_json::from_str::<JsonRpcNotification>(&line) {
+                // Handle streaming notifications
+                if notification.method == "chat.stream" {
+                    if let Some(params) = notification.params {
+                        let sender_guard = stream_sender.lock().unwrap();
+                        if let Some(sender) = sender_guard.as_ref() {
+                            if let Some(chunk) = params.get("chunk").and_then(|v| v.as_str()) {
+                                let _ = sender.send(StreamEvent::Chunk(chunk.to_string()));
+                            }
+                            if params.get("done").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                // Parse token stats from done notification
+                                let tokens = params.get("tokens")
+                                    .and_then(|v| serde_json::from_value::<TokenStats>(v.clone()).ok());
+                                let _ = sender.send(StreamEvent::Done { tokens });
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -321,14 +399,66 @@ impl Backend {
             .map_err(|_| BackendError::ProcessDied)?
     }
 
+    /// Start a streaming chat request. Returns a receiver for stream events.
+    /// The final response will be returned when you call chat_send_finish().
+    pub fn chat_send_stream(&mut self, message: &str) -> Result<mpsc::Receiver<StreamEvent>, BackendError> {
+        // Set up stream receiver
+        let (tx, rx) = mpsc::channel();
+        {
+            let mut sender = self.stream_sender.lock().unwrap();
+            *sender = Some(tx);
+        }
+
+        // Send the request (with streaming enabled)
+        let params = serde_json::json!({
+            "message": message,
+            "stream": true
+        });
+
+        // Send request but don't wait for response yet
+        if !self.ready {
+            return Err(BackendError::NotStarted);
+        }
+
+        let id = self.next_id();
+        let request = JsonRpcRequest::new("chat.send", params, id);
+
+        // Create channel for final response
+        let (resp_tx, _resp_rx) = mpsc::channel();
+        {
+            let mut pending = self.pending.lock().unwrap();
+            pending.insert(id, resp_tx);
+        }
+
+        // Send request
+        let stdin = self.stdin.as_mut().ok_or(BackendError::NotStarted)?;
+        let request_json = serde_json::to_string(&request)
+            .map_err(|e| BackendError::ParseError(e.to_string()))?;
+
+        writeln!(stdin, "{}", request_json)
+            .map_err(|e| BackendError::IoError(e.to_string()))?;
+        stdin.flush()
+            .map_err(|e| BackendError::IoError(e.to_string()))?;
+
+        Ok(rx)
+    }
+
+    /// Non-streaming chat send (for backwards compatibility)
     pub fn chat_send(&mut self, message: &str) -> Result<ChatResponse, BackendError> {
         let params = serde_json::json!({
-            "message": message
+            "message": message,
+            "stream": false
         });
 
         let result = self.call("chat.send", params)?;
         serde_json::from_value(result)
             .map_err(|e| BackendError::ParseError(e.to_string()))
+    }
+
+    /// Clear the stream sender (call after streaming is done)
+    pub fn clear_stream(&mut self) {
+        let mut sender = self.stream_sender.lock().unwrap();
+        *sender = None;
     }
 
     pub fn get_token_stats(&mut self) -> Result<TokenStats, BackendError> {
@@ -400,6 +530,12 @@ impl Backend {
             .map_err(|e| BackendError::ParseError(e.to_string()))
     }
 
+    pub fn rag_embeddings(&mut self) -> Result<RagEmbeddingsResponse, BackendError> {
+        let result = self.call("rag.embeddings", serde_json::json!({}))?;
+        serde_json::from_value(result)
+            .map_err(|e| BackendError::ParseError(e.to_string()))
+    }
+
     pub fn codebase_init(&mut self, path: Option<&str>, clear: bool) -> Result<CodebaseInitResponse, BackendError> {
         let mut params = serde_json::Map::new();
         if let Some(p) = path {
@@ -410,6 +546,24 @@ impl Backend {
         }
 
         let result = self.call("codebase.init", serde_json::Value::Object(params))?;
+        serde_json::from_value(result)
+            .map_err(|e| BackendError::ParseError(e.to_string()))
+    }
+
+    pub fn model_get(&mut self) -> Result<ModelGetResponse, BackendError> {
+        let result = self.call("model.get", serde_json::json!({}))?;
+        serde_json::from_value(result)
+            .map_err(|e| BackendError::ParseError(e.to_string()))
+    }
+
+    pub fn model_set(&mut self, model: &str) -> Result<ModelSetResponse, BackendError> {
+        let result = self.call("model.set", serde_json::json!({"model": model}))?;
+        serde_json::from_value(result)
+            .map_err(|e| BackendError::ParseError(e.to_string()))
+    }
+
+    pub fn model_list(&mut self) -> Result<ModelListResponse, BackendError> {
+        let result = self.call("model.list", serde_json::json!({}))?;
         serde_json::from_value(result)
             .map_err(|e| BackendError::ParseError(e.to_string()))
     }
@@ -433,5 +587,209 @@ impl Default for Backend {
 impl Drop for Backend {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_token_stats_deserialize() {
+        let json = r#"{
+            "total_input": 100,
+            "total_output": 200,
+            "total_tokens": 300,
+            "total_cost": 0.005,
+            "request_count": 5
+        }"#;
+
+        let stats: TokenStats = serde_json::from_str(json).unwrap();
+
+        assert_eq!(stats.total_input, 100);
+        assert_eq!(stats.total_output, 200);
+        assert_eq!(stats.total_tokens, 300);
+        assert!((stats.total_cost - 0.005).abs() < 0.0001);
+        assert_eq!(stats.request_count, 5);
+    }
+
+    #[test]
+    fn test_token_stats_deserialize_with_budget() {
+        let json = r#"{
+            "total_input": 100,
+            "total_output": 200,
+            "total_tokens": 300,
+            "total_cost": 0.005,
+            "request_count": 5,
+            "budget": 10000,
+            "budget_remaining": 9700
+        }"#;
+
+        let stats: TokenStats = serde_json::from_str(json).unwrap();
+
+        assert_eq!(stats.budget, Some(10000));
+        assert_eq!(stats.budget_remaining, Some(9700));
+    }
+
+    #[test]
+    fn test_token_stats_deserialize_defaults() {
+        let json = r#"{}"#;
+
+        let stats: TokenStats = serde_json::from_str(json).unwrap();
+
+        assert_eq!(stats.total_input, 0);
+        assert_eq!(stats.total_output, 0);
+        assert_eq!(stats.total_tokens, 0);
+        assert_eq!(stats.total_cost, 0.0);
+        assert_eq!(stats.budget, None);
+    }
+
+    #[test]
+    fn test_embedding_point_deserialize() {
+        let json = r#"{
+            "id": "chunk_123",
+            "x": 0.5,
+            "y": 0.75,
+            "path": "src/main.rs",
+            "type": "function"
+        }"#;
+
+        let point: EmbeddingPoint = serde_json::from_str(json).unwrap();
+
+        assert_eq!(point.id, "chunk_123");
+        assert!((point.x - 0.5).abs() < 0.0001);
+        assert!((point.y - 0.75).abs() < 0.0001);
+        assert_eq!(point.path, "src/main.rs");
+        assert_eq!(point.chunk_type, "function");
+    }
+
+    #[test]
+    fn test_embedding_point_deserialize_defaults() {
+        let json = r#"{
+            "id": "chunk_123",
+            "x": 0.5,
+            "y": 0.75
+        }"#;
+
+        let point: EmbeddingPoint = serde_json::from_str(json).unwrap();
+
+        assert_eq!(point.id, "chunk_123");
+        assert_eq!(point.path, "");
+        assert_eq!(point.chunk_type, "");
+    }
+
+    #[test]
+    fn test_rag_embeddings_response_deserialize() {
+        let json = r#"{
+            "points": [
+                {"id": "chunk1", "x": 0.1, "y": 0.2, "path": "a.rs", "type": "function"},
+                {"id": "chunk2", "x": 0.3, "y": 0.4, "path": "b.rs", "type": "class"}
+            ],
+            "count": 2
+        }"#;
+
+        let response: RagEmbeddingsResponse = serde_json::from_str(json).unwrap();
+
+        assert_eq!(response.count, 2);
+        assert_eq!(response.points.len(), 2);
+        assert_eq!(response.points[0].id, "chunk1");
+        assert_eq!(response.points[1].id, "chunk2");
+        assert!(response.error.is_none());
+    }
+
+    #[test]
+    fn test_rag_embeddings_response_with_error() {
+        let json = r#"{
+            "points": [],
+            "count": 0,
+            "error": "RAG not initialized"
+        }"#;
+
+        let response: RagEmbeddingsResponse = serde_json::from_str(json).unwrap();
+
+        assert_eq!(response.count, 0);
+        assert!(response.points.is_empty());
+        assert_eq!(response.error, Some("RAG not initialized".to_string()));
+    }
+
+    #[test]
+    fn test_stream_notification_chunk_parsing() {
+        let json = r#"{"chunk": "Hello world"}"#;
+        let params: serde_json::Value = serde_json::from_str(json).unwrap();
+
+        let chunk = params.get("chunk").and_then(|v| v.as_str());
+        assert_eq!(chunk, Some("Hello world"));
+    }
+
+    #[test]
+    fn test_stream_notification_done_with_tokens() {
+        let json = r#"{
+            "done": true,
+            "tokens": {
+                "total_input": 50,
+                "total_output": 100,
+                "total_tokens": 150,
+                "total_cost": 0.002,
+                "request_count": 1
+            }
+        }"#;
+
+        let params: serde_json::Value = serde_json::from_str(json).unwrap();
+
+        let done = params.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
+        assert!(done);
+
+        let tokens = params
+            .get("tokens")
+            .and_then(|v| serde_json::from_value::<TokenStats>(v.clone()).ok());
+
+        assert!(tokens.is_some());
+        let stats = tokens.unwrap();
+        assert_eq!(stats.total_tokens, 150);
+        assert_eq!(stats.total_input, 50);
+        assert_eq!(stats.total_output, 100);
+    }
+
+    #[test]
+    fn test_stream_notification_done_without_tokens() {
+        let json = r#"{"done": true}"#;
+        let params: serde_json::Value = serde_json::from_str(json).unwrap();
+
+        let done = params.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
+        assert!(done);
+
+        let tokens = params
+            .get("tokens")
+            .and_then(|v| serde_json::from_value::<TokenStats>(v.clone()).ok());
+
+        assert!(tokens.is_none());
+    }
+
+    #[test]
+    fn test_rag_status_response_deserialize() {
+        let json = r#"{
+            "initialized": true,
+            "count": 42,
+            "db_path": "/path/to/db",
+            "collection": "my_collection"
+        }"#;
+
+        let response: RagStatusResponse = serde_json::from_str(json).unwrap();
+
+        assert!(response.initialized);
+        assert_eq!(response.count, 42);
+    }
+
+    #[test]
+    fn test_rag_status_response_not_initialized() {
+        let json = r#"{
+            "initialized": false,
+            "count": 0
+        }"#;
+
+        let response: RagStatusResponse = serde_json::from_str(json).unwrap();
+
+        assert!(!response.initialized);
+        assert_eq!(response.count, 0);
     }
 }

@@ -1,6 +1,7 @@
 # OpenAgent TUI launcher for Windows
 param(
     [switch]$Offline,
+    [switch]$Rebuild,
     [switch]$Help
 )
 
@@ -13,12 +14,13 @@ if ($Help) {
     Write-Host ""
     Write-Host "Options:"
     Write-Host "  -Offline    Run without Python backend (mock responses)"
+    Write-Host "  -Rebuild    Rebuild TUI before running"
     Write-Host "  -Help       Show this help message"
     exit 0
 }
 
-# Check if TUI is built
-if (-not (Test-Path $TuiBin)) {
+# Check if TUI needs to be built
+if ($Rebuild -or -not (Test-Path $TuiBin)) {
     Write-Host "Building TUI..."
     Push-Location (Join-Path $ScriptDir "TUI")
     cargo build --release

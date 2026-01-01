@@ -29,17 +29,41 @@ class RAGQuery:
 
     def __init__(
         self,
-        db_path: Path | str = "./chroma_db",
+        db_path: Path | str | None = None,
         collection_name: str = "codebase_specs",
+        store: "RAGStore | None" = None,  # type: ignore
     ):
-        self.db_path = Path(db_path)
-        self.collection_name = collection_name
+        """
+        Initialize RAGQuery.
 
-        self._client = chromadb.PersistentClient(
-            path=str(self.db_path),
-            settings=Settings(anonymized_telemetry=False),
-        )
-        self._collection = self._client.get_or_create_collection(collection_name)
+        Args:
+            db_path: Path to ChromaDB database (ignored if store is provided)
+            collection_name: Name of the collection (ignored if store is provided)
+            store: Optional RAGStore to share collection with (preferred)
+        """
+        self._store = store
+        if store is not None:
+            # Use store's client, access collection dynamically via property
+            self._client = store._client
+            self.db_path = store.db_path
+            self.collection_name = store.collection_name
+        else:
+            # Create own client (for backwards compatibility)
+            self._store = None
+            self.db_path = Path(db_path) if db_path else Path("./chroma_db")
+            self.collection_name = collection_name
+            self._client = chromadb.PersistentClient(
+                path=str(self.db_path),
+                settings=Settings(anonymized_telemetry=False),
+            )
+            self._own_collection = self._client.get_or_create_collection(collection_name)
+
+    @property
+    def _collection(self):
+        """Get collection - delegates to store if available for consistency after clear()."""
+        if self._store is not None:
+            return self._store._collection
+        return self._own_collection
 
     def search(
         self,

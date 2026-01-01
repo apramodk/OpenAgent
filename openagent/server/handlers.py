@@ -1,7 +1,8 @@
 """JSON-RPC method handlers."""
 
+import hashlib
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Awaitable
 
 from openagent.core.agent import Agent, AgentConfig
 from openagent.memory.session import SessionManager, Session
@@ -9,6 +10,20 @@ from openagent.telemetry.tokens import TokenTracker
 from openagent.rag.store import RAGStore, Chunk, ChunkMetadata
 from openagent.rag.query import RAGQuery
 from openagent.rag.scanner import scan_and_generate_chunks
+
+# Type for async notification sender
+NotifySender = Callable[[str, dict], Awaitable[None]]
+
+
+def get_collection_name_for_path(codebase_path: str) -> str:
+    """Generate a unique collection name for a codebase path."""
+    # Use hash of absolute path to create unique but consistent name
+    path_hash = hashlib.sha256(codebase_path.encode()).hexdigest()[:12]
+    # Get the directory name for readability
+    dir_name = Path(codebase_path).name.lower()
+    # Sanitize: only alphanumeric and underscore
+    dir_name = "".join(c if c.isalnum() else "_" for c in dir_name)[:20]
+    return f"codebase_{dir_name}_{path_hash}"
 
 
 class Handlers:
@@ -20,15 +35,37 @@ class Handlers:
         session_manager: SessionManager | None = None,
         rag_store: RAGStore | None = None,
         rag_query: RAGQuery | None = None,
+        rag_db_path: Path | str | None = None,
+        notify: NotifySender | None = None,
     ):
         self.agent = agent
         self.session_manager = session_manager
         self.rag_store = rag_store
         self.rag_query = rag_query
+        self.rag_db_path = Path(rag_db_path) if rag_db_path else Path.home() / ".local/share/openagent/chroma_db"
         self._current_session: Session | None = None
+        self._current_codebase_path: str | None = None
+        self._notify = notify  # For sending streaming notifications
+
+    def _switch_rag_collection(self, codebase_path: str) -> None:
+        """Switch to RAG collection for the given codebase path."""
+        if self._current_codebase_path == codebase_path:
+            return  # Already using this collection
+
+        collection_name = get_collection_name_for_path(codebase_path)
+
+        try:
+            self.rag_store = RAGStore(
+                db_path=self.rag_db_path,
+                collection_name=collection_name,
+            )
+            self.rag_query = RAGQuery(store=self.rag_store)
+            self._current_codebase_path = codebase_path
+        except Exception as e:
+            print(f"Warning: Could not switch RAG collection: {e}")
 
     async def chat_send(self, params: dict) -> dict:
-        """Process a chat message with optional RAG context."""
+        """Process a chat message with streaming support."""
         if not self.agent:
             return {"error": "Agent not initialized"}
 
@@ -37,14 +74,40 @@ class Handlers:
             return {"error": "No message provided"}
 
         use_rag = params.get("use_rag", True)  # Default to using RAG if available
+        stream = params.get("stream", True)  # Default to streaming
 
         try:
+            # Get RAG context if available
+            rag_context = None
             if use_rag and self.rag_query:
-                # Use RAG-enhanced chat
-                response = await self.agent.chat_with_rag(message, self.rag_query)
+                intent = self.agent.get_intent(message)
+                query = intent.query if intent else message
+                rag_context = self.rag_query.get_context_for_query(
+                    query,
+                    max_tokens=self.agent.context_manager.config.max_rag_tokens,
+                )
+
+            if stream and self._notify:
+                # Stream the response
+                full_response = ""
+                async for chunk in self.agent.chat_stream(message, rag_context=rag_context):
+                    full_response += chunk
+                    # Send chunk notification
+                    await self._notify("chat.stream", {"chunk": chunk})
+
+                # Get token stats to include in done notification
+                done_payload: dict = {"done": True}
+                if self.agent.token_tracker:
+                    stats = self.agent.token_tracker.get_session_stats()
+                    done_payload["tokens"] = stats.to_dict()
+
+                # Send stream end notification with token stats
+                await self._notify("chat.stream", done_payload)
+                response = full_response
             else:
-                # Regular chat without RAG
-                response = await self.agent.chat(message)
+                # Non-streaming fallback
+                response = await self.agent.chat(message, rag_context=rag_context)
+
         except Exception as e:
             error_msg = str(e)
             # Provide helpful message for common issues
@@ -88,6 +151,11 @@ class Handlers:
         )
         self._current_session = session
 
+        # Switch to codebase-specific RAG collection
+        if codebase_path:
+            abs_path = str(Path(codebase_path).resolve())
+            self._switch_rag_collection(abs_path)
+
         # Initialize agent with new session
         self._init_agent(session)
 
@@ -107,6 +175,12 @@ class Handlers:
             return {"error": f"Session not found: {session_id}"}
 
         self._current_session = session
+
+        # Switch to codebase-specific RAG collection
+        if session.codebase_path:
+            abs_path = str(Path(session.codebase_path).resolve())
+            self._switch_rag_collection(abs_path)
+
         self._init_agent(session)
 
         return session.to_dict()
@@ -166,6 +240,46 @@ class Handlers:
         self.agent.token_tracker.budget = budget
 
         return {"budget": budget}
+
+    async def model_get(self, params: dict) -> dict:
+        """Get current model."""
+        if not self.agent or not self.agent.llm:
+            return {"error": "Agent not initialized", "model": None}
+
+        return {"model": self.agent.llm.model}
+
+    async def model_set(self, params: dict) -> dict:
+        """Set the LLM model."""
+        model = params.get("model")
+        if not model:
+            return {"error": "No model specified", "model": None}
+
+        if not self.agent:
+            return {"error": "Agent not initialized", "model": None}
+
+        # Update the model on the LLM client
+        old_model = self.agent.llm.model
+        self.agent.llm.model = model
+        self.agent.config.model = model
+
+        return {
+            "model": model,
+            "previous": old_model,
+        }
+
+    async def model_list(self, params: dict) -> dict:
+        """List available models (common Azure OpenAI deployments)."""
+        # These are common deployment names - actual availability depends on Azure setup
+        models = [
+            {"id": "gpt-4o", "description": "GPT-4o - Latest multimodal model"},
+            {"id": "gpt-4o-mini", "description": "GPT-4o Mini - Fast and efficient"},
+            {"id": "gpt-4", "description": "GPT-4 - High capability"},
+            {"id": "gpt-4-turbo", "description": "GPT-4 Turbo - Fast GPT-4"},
+            {"id": "gpt-35-turbo", "description": "GPT-3.5 Turbo - Fast and cheap"},
+            {"id": "o1-preview", "description": "O1 Preview - Reasoning model"},
+            {"id": "o1-mini", "description": "O1 Mini - Smaller reasoning model"},
+        ]
+        return {"models": models}
 
     async def tools_list(self, params: dict) -> dict:
         """List available tools."""
@@ -271,6 +385,63 @@ class Handlers:
             "collection": self.rag_store.collection_name,
         }
 
+    async def rag_embeddings(self, params: dict) -> dict:
+        """Get embeddings projected to 2D for visualization."""
+        if not self.rag_store:
+            return {"error": "RAG not initialized", "points": []}
+
+        try:
+            # Get all embeddings from ChromaDB
+            collection = self.rag_store._collection
+            result = collection.get(include=["embeddings", "metadatas"])
+
+            if not result["ids"] or not result["embeddings"]:
+                return {"points": [], "count": 0}
+
+            ids = result["ids"]
+            embeddings = result["embeddings"]
+            metadatas = result["metadatas"] or [{}] * len(ids)
+
+            # Project to 2D using PCA
+            import numpy as np
+
+            embeddings_array = np.array(embeddings)
+
+            if len(embeddings_array) < 2:
+                # Not enough points for PCA, just use first 2 dims
+                points_2d = embeddings_array[:, :2] if embeddings_array.shape[1] >= 2 else embeddings_array
+            else:
+                # Simple PCA: center and project to top 2 principal components
+                centered = embeddings_array - np.mean(embeddings_array, axis=0)
+                # Use SVD for PCA
+                U, S, Vt = np.linalg.svd(centered, full_matrices=False)
+                points_2d = centered @ Vt[:2].T
+
+            # Normalize to 0-1 range
+            if len(points_2d) > 0:
+                min_vals = points_2d.min(axis=0)
+                max_vals = points_2d.max(axis=0)
+                range_vals = max_vals - min_vals
+                range_vals[range_vals == 0] = 1  # Avoid division by zero
+                points_2d = (points_2d - min_vals) / range_vals
+
+            # Build response
+            points = []
+            for i, chunk_id in enumerate(ids):
+                meta = metadatas[i] if i < len(metadatas) else {}
+                points.append({
+                    "id": chunk_id,
+                    "x": float(points_2d[i][0]) if len(points_2d[i]) > 0 else 0.5,
+                    "y": float(points_2d[i][1]) if len(points_2d[i]) > 1 else 0.5,
+                    "path": meta.get("path", ""),
+                    "type": meta.get("type", ""),
+                })
+
+            return {"points": points, "count": len(points)}
+
+        except Exception as e:
+            return {"error": str(e), "points": []}
+
     async def codebase_init(self, params: dict) -> dict:
         """
         Initialize RAG by scanning a codebase.
@@ -278,9 +449,6 @@ class Handlers:
         Scans the codebase directory, extracts semantic information from code files,
         and ingests them into the RAG store.
         """
-        if not self.rag_store:
-            return {"error": "RAG store not initialized", "chunks": 0}
-
         codebase_path = params.get("path")
         if not codebase_path:
             # Try to get from current session
@@ -295,6 +463,13 @@ class Handlers:
 
         if not path.is_dir():
             return {"error": f"Path is not a directory: {codebase_path}", "chunks": 0}
+
+        # Switch to codebase-specific RAG collection
+        abs_path = str(path.resolve())
+        self._switch_rag_collection(abs_path)
+
+        if not self.rag_store:
+            return {"error": "RAG store not initialized", "chunks": 0}
 
         try:
             # Clear existing chunks for this codebase (optional, based on params)
@@ -325,6 +500,8 @@ class Handlers:
 
     def _init_agent(self, session: Session) -> None:
         """Initialize agent for a session."""
+        from openagent.core.llm import AzureOpenAIClient
+
         db_path = self.session_manager.db_path if self.session_manager else Path("sessions.db")
 
         token_tracker = TokenTracker(
@@ -332,12 +509,17 @@ class Handlers:
             db_path=db_path,
         )
 
+        # Create LLM client with env var defaults
+        llm_client = AzureOpenAIClient()
+
         config = AgentConfig(
             system_prompt="You are a helpful AI assistant for understanding codebases.",
+            model=llm_client.model,  # Use the actual model from client
         )
 
         self.agent = Agent(
             config=config,
+            llm_client=llm_client,
             token_tracker=token_tracker,
         )
 
@@ -345,6 +527,7 @@ class Handlers:
 def create_handlers(
     db_path: Path | str | None = None,
     rag_db_path: Path | str | None = None,
+    notify: NotifySender | None = None,
 ) -> dict:
     """Create handler functions dictionary for JSON-RPC server."""
     if db_path is None:
@@ -355,10 +538,10 @@ def create_handlers(
 
     session_manager = SessionManager(db_path)
 
-    # Initialize RAG components
+    # Initialize RAG components (default collection, will be switched per-codebase)
     try:
         rag_store = RAGStore(db_path=rag_db_path)
-        rag_query = RAGQuery(db_path=rag_db_path)
+        rag_query = RAGQuery(store=rag_store)
     except Exception as e:
         print(f"Warning: Could not initialize RAG: {e}")
         rag_store = None
@@ -368,6 +551,8 @@ def create_handlers(
         session_manager=session_manager,
         rag_store=rag_store,
         rag_query=rag_query,
+        rag_db_path=rag_db_path,
+        notify=notify,
     )
 
     return {
@@ -379,10 +564,14 @@ def create_handlers(
         "session.delete": handlers.session_delete,
         "tokens.get": handlers.tokens_get,
         "tokens.set_budget": handlers.tokens_set_budget,
+        "model.get": handlers.model_get,
+        "model.set": handlers.model_set,
+        "model.list": handlers.model_list,
         "tools.list": handlers.tools_list,
         "tools.call": handlers.tools_call,
         "rag.search": handlers.rag_search,
         "rag.ingest": handlers.rag_ingest,
         "rag.status": handlers.rag_status,
+        "rag.embeddings": handlers.rag_embeddings,
         "codebase.init": handlers.codebase_init,
     }

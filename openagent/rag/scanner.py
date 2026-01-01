@@ -365,7 +365,8 @@ def analysis_to_chunks(analysis: FileAnalysis) -> list[Chunk]:
 
     # Code unit chunks
     for unit in analysis.units:
-        unit_id = f"{analysis.path}:{unit.name}"
+        # Include unit_type and line number in ID to ensure uniqueness
+        unit_id = f"{analysis.path}:{unit.unit_type}:{unit.name}:L{unit.start_line}"
         unit_desc = f"{unit.name}: "
 
         if unit.docstring:

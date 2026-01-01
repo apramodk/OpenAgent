@@ -99,8 +99,16 @@ class Agent:
             )
             return window.messages
         else:
-            # In-memory mode - just use all messages
+            # In-memory mode - build messages with RAG context
             messages = [{"role": m.role, "content": m.content} for m in self._messages]
+
+            # Inject RAG context before user message
+            if rag_context:
+                messages.append({
+                    "role": "system",
+                    "content": f"Relevant context from the codebase:\n\n{rag_context}"
+                })
+
             messages.append({"role": "user", "content": user_message})
             return messages
 
@@ -119,6 +127,25 @@ class Agent:
                 output_tokens=response.output_tokens,
                 model=response.model,
                 request_id=response.request_id,
+            )
+            self.token_tracker.record(usage)
+
+    def _estimate_tokens(self, text: str) -> int:
+        """Estimate token count for text (~4 chars per token)."""
+        return len(text) // 4 + 1
+
+    def _record_estimated_usage(
+        self,
+        input_text: str,
+        output_text: str,
+        model: str | None = None,
+    ) -> None:
+        """Record estimated token usage for streaming responses."""
+        if self.token_tracker:
+            usage = TokenUsage(
+                input_tokens=self._estimate_tokens(input_text),
+                output_tokens=self._estimate_tokens(output_text),
+                model=model or self.config.model,
             )
             self.token_tracker.record(usage)
 
@@ -212,6 +239,9 @@ class Agent:
         context = self._get_context(message, rag_context)
         self._record_message("user", message)
 
+        # Build input text for token estimation (system + context + message)
+        input_text = self.config.system_prompt + (rag_context or "") + message
+
         full_response = ""
         async for chunk in self.llm.stream(
             messages=context,
@@ -222,6 +252,9 @@ class Agent:
             yield chunk
 
         self._record_message("assistant", full_response)
+
+        # Record estimated token usage for streaming
+        self._record_estimated_usage(input_text, full_response)
 
     async def chat_with_rag(
         self,

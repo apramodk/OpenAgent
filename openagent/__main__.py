@@ -24,7 +24,9 @@ def run_server() -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     server = JSONRPCServer()
-    handlers = create_handlers(db_path)
+
+    # Create handlers with server's notify function for streaming
+    handlers = create_handlers(db_path, notify=server.notify)
     server.register_all(handlers)
 
     # Notify TUI that server is ready

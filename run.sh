@@ -6,30 +6,35 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TUI_BIN="$SCRIPT_DIR/TUI/target/release/openagent-tui"
 
-# Check if TUI is built
-if [ ! -f "$TUI_BIN" ]; then
-    echo "Building TUI..."
-    cd "$SCRIPT_DIR/TUI"
-    cargo build --release
-fi
-
 # Parse arguments
 OFFLINE=""
+REBUILD=""
 for arg in "$@"; do
     case $arg in
         --offline|-o)
             OFFLINE="--offline"
+            ;;
+        --rebuild|-r)
+            REBUILD="1"
             ;;
         --help|-h)
             echo "Usage: ./run.sh [OPTIONS]"
             echo ""
             echo "Options:"
             echo "  --offline, -o    Run without Python backend (mock responses)"
+            echo "  --rebuild, -r    Rebuild TUI before running"
             echo "  --help, -h       Show this help message"
             exit 0
             ;;
     esac
 done
+
+# Build TUI if needed
+if [ ! -f "$TUI_BIN" ] || [ -n "$REBUILD" ]; then
+    echo "Building TUI..."
+    cd "$SCRIPT_DIR/TUI"
+    cargo build --release
+fi
 
 # Activate virtual environment for Python backend
 if [ -z "$OFFLINE" ]; then
