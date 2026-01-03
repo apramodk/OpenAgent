@@ -19,21 +19,21 @@ if TYPE_CHECKING:
 class ContextConfig:
     """Configuration for context management."""
 
-    # Token limits
-    max_tokens: int = 8000
-    reserved_for_response: int = 1000  # Reserve tokens for LLM response
+    # Token limits - scaled for GPT-4.1 (1M context window)
+    max_tokens: int = 128000
+    reserved_for_response: int = 16384  # Reserve tokens for LLM response
 
     # Message selection
-    recent_messages: int = 20  # Keep last N messages before applying token budget
+    recent_messages: int = 50  # Keep last N messages before applying token budget
     always_include_system: bool = True
 
     # Summarization
-    summarize_after: int = 30  # Summarize after N messages
-    summary_max_tokens: int = 500
+    summarize_after: int = 100  # Summarize after N messages
+    summary_max_tokens: int = 2000
 
-    # RAG
-    max_rag_tokens: int = 2000
-    max_rag_chunks: int = 5
+    # RAG - more context for better retrieval
+    max_rag_tokens: int = 8000
+    max_rag_chunks: int = 15
 
     @property
     def available_for_context(self) -> int:

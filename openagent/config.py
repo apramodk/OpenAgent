@@ -12,10 +12,10 @@ class LLMConfig:
     """LLM configuration."""
 
     provider: str = "azure"
-    model: str = "gpt-4o-mini"
+    model: str = "gpt-4.1"
     endpoint: str = ""
     api_key: str = ""
-    max_tokens: int = 4096
+    max_tokens: int = 16384  # GPT-4.1 supports up to 32K output
     temperature: float = 0.7
 
 
@@ -109,10 +109,10 @@ class Config:
     def _parse_llm_config(cls, data: dict) -> LLMConfig:
         return LLMConfig(
             provider=data.get("provider", "azure"),
-            model=data.get("model", "gpt-4o-mini"),
+            model=data.get("model", "gpt-4.1"),
             endpoint=cls._expand_env(data.get("endpoint", "")),
             api_key=cls._expand_env(data.get("api_key", "")),
-            max_tokens=data.get("max_tokens", 4096),
+            max_tokens=data.get("max_tokens", 16384),
             temperature=data.get("temperature", 0.7),
         )
 

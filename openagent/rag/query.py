@@ -170,8 +170,8 @@ class RAGQuery:
     def get_context_for_query(
         self,
         query: str,
-        max_tokens: int = 2000,
-        n_results: int = 10,
+        max_tokens: int = 8000,
+        n_results: int = 20,
     ) -> str:
         """
         Get formatted context string for LLM consumption.

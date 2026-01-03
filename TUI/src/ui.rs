@@ -153,16 +153,18 @@ fn draw_home(frame: &mut Frame, app: &App) {
 
 fn draw_background_pattern(frame: &mut Frame, area: Rect, anim_frame: usize) {
     let pattern_offset = (anim_frame / 30) % 4;
+
+    // Simple twinkling starfield background
     let mut lines: Vec<Line> = Vec::new();
 
-    for y in 0..area.height {
+    for y in 0..area.height as usize {
         let mut spans: Vec<Span> = Vec::new();
-        for x in 0..area.width {
-            let show_dot = ((x as usize + pattern_offset) % 10 == 0) &&
-                          ((y as usize + pattern_offset) % 5 == 0);
-            if show_dot {
-                let brightness = 25 + ((anim_frame as f64 / 60.0 + (x as f64 / 12.0)).sin().abs() * 12.0) as u8;
-                spans.push(Span::styled(".", Style::default().fg(Color::Rgb(brightness, brightness + 2, brightness + 5))));
+        for x in 0..area.width as usize {
+            let show_star = ((x + pattern_offset) % 12 == 0) && ((y + pattern_offset) % 6 == 0);
+            if show_star {
+                let brightness = 25 + ((anim_frame as f64 / 60.0 + (x as f64 / 12.0)).sin().abs() * 15.0) as u8;
+                let color = Color::Rgb(brightness, brightness + 2, brightness + 5);
+                spans.push(Span::styled(".", Style::default().fg(color)));
             } else {
                 spans.push(Span::raw(" "));
             }

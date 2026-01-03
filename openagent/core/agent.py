@@ -16,16 +16,16 @@ from openagent.telemetry.tokens import TokenTracker, TokenUsage
 class AgentConfig:
     """Configuration for the Agent."""
 
-    model: str = "gpt-4o-mini"
+    model: str = "gpt-4.1"
     api_endpoint: str = ""
-    max_tokens: int = 4096
+    max_tokens: int = 16384  # GPT-4.1 supports up to 32K output
     temperature: float = 0.7
     token_budget: int | None = None
     system_prompt: str = ""
 
-    # Context management
-    context_max_tokens: int = 8000
-    context_recent_messages: int = 20
+    # Context management - GPT-4.1 has 1M context window
+    context_max_tokens: int = 128000
+    context_recent_messages: int = 50
 
 
 @dataclass
