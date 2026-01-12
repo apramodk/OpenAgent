@@ -4,7 +4,7 @@ import pytest
 from pathlib import Path
 
 from openagent.memory.session import SessionManager
-from openagent.memory.conversation import ConversationHistory, Message
+from openagent.memory.conversation import ConversationHistory, SQLiteConversationHistory, Message
 
 
 class TestMessage:
@@ -32,7 +32,7 @@ class TestConversationHistory:
         """Create a conversation history with test database."""
         manager = SessionManager(tmp_db_path)
         session = manager.create(name="Test Session")
-        return ConversationHistory(session, tmp_db_path)
+        return SQLiteConversationHistory(session, tmp_db_path)
 
     def test_add_message(self, history: ConversationHistory):
         """Test adding a message."""

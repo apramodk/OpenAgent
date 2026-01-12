@@ -6,12 +6,10 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use crate::backend::{Backend, BackendError, StreamEvent, EmbeddingPoint};
-
-#[derive(Clone, Copy, PartialEq)]
-pub enum Screen {
-    Home,
-    Chat,
-}
+use crate::config::{Config, COMMANDS};
+use crate::action::Action;
+use crate::command::CommandParser;
+use crate::ui_state::{UIState, Screen, Focus};
 
 #[derive(Clone)]
 pub struct Message {
@@ -123,30 +121,6 @@ impl ActivityLog {
     }
 }
 
-// Available commands for the popup
-pub const COMMANDS: &[(&str, &str)] = &[
-    ("/help", "Show available commands"),
-    ("/clear", "Clear chat history"),
-    ("/init", "Index current codebase"),
-    ("/rag", "Show RAG status"),
-    ("/search", "Search codebase (RAG)"),
-    ("/model", "Get/set LLM model"),
-    ("/session", "Session info"),
-    ("/budget", "Token budget info"),
-    ("/debug", "Toggle debug overlay"),
-    ("/copy", "Export chat to file"),
-    ("/quit", "Exit OpenAgent"),
-];
-
-// Features that are spec'd but not yet implemented
-pub const COMING_SOON: &[&str] = &[
-    "Streaming responses",
-    "Tool execution",
-    "Intent routing (DSPy)",
-    "Cancel requests",
-    "Multi-session",
-];
-
 /// Debug dump structure for external analysis
 #[derive(Serialize)]
 pub struct DebugDump {
@@ -183,48 +157,23 @@ pub struct DebugRag {
     pub chunk_count: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Focus {
-    Chat,
-    Input,
-    Visualization,
-}
-
 pub struct App {
-    pub screen: Screen,
+    pub config: Config,
+    pub ui: UIState,
     pub messages: VecDeque<Message>,
-    pub input: String,
     pub tokens: TokenStats,
     pub rag: RagStatus,
     pub cwd: PathBuf,
-    pub scroll_offset: usize,
-    pub is_loading: bool,
     pub animation_frame: usize,
     pub animation_tick: u64,
     pub backend: Backend,
     pub backend_connected: bool,
-    pub status_message: Option<String>,
-    // Command popup state
-    pub command_selection: Option<usize>,  // None = original input, Some(n) = nth filtered command
-    // Debug mode - when enabled, writes state to .openagent-debug.json
-    pub debug_mode: bool,
     // Activity log - shows what's happening
     pub activity: ActivityLog,
-    // Send animation state (ticks remaining)
-    pub send_animation: u8,
-    // Total lines in chat (for scroll indicator)
-    pub total_chat_lines: usize,
-    // Which panel is focused
-    pub focus: Focus,
     // Streaming state
     stream_receiver: Option<Receiver<StreamEvent>>,
     streaming_content: String,
-    // Visualization state
-    pub show_visualization: bool,
     pub embedding_points: Vec<EmbeddingPoint>,
-    pub hovered_point: Option<usize>,  // Index of hovered point
-    // Markdown rendering toggle (false = rendered preview, true = raw markdown)
-    pub show_raw_markdown: bool,
 }
 
 impl App {
@@ -232,31 +181,20 @@ impl App {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
         Self {
-            screen: Screen::Home,
+            config: Config::default(),
+            ui: UIState::new(),
             messages: VecDeque::new(),
-            input: String::new(),
             tokens: TokenStats::default(),
             rag: RagStatus::default(),
             cwd,
-            scroll_offset: 0,
-            is_loading: false,
             animation_frame: 0,
             animation_tick: 0,
             backend: Backend::new(),
             backend_connected: false,
-            status_message: None,
-            command_selection: None,
-            debug_mode: false,
             activity: ActivityLog::default(),
-            send_animation: 0,
-            total_chat_lines: 0,
-            focus: Focus::Input,  // Start with input focused
             stream_receiver: None,
             streaming_content: String::new(),
-            show_visualization: false,
             embedding_points: Vec::new(),
-            hovered_point: None,
-            show_raw_markdown: false,  // Default to rendered markdown preview
         }
     }
 
@@ -265,12 +203,12 @@ impl App {
         DebugDump {
             timestamp: Utc::now().to_rfc3339(),
             cwd: self.cwd.to_string_lossy().to_string(),
-            screen: match self.screen {
+            screen: match self.ui.screen {
                 Screen::Home => "Home".to_string(),
                 Screen::Chat => "Chat".to_string(),
             },
             backend_connected: self.backend_connected,
-            debug_mode: self.debug_mode,
+            debug_mode: self.ui.debug_mode,
             messages: self.messages.iter().map(|m| DebugMessage {
                 role: match m.role {
                     Role::User => "user".to_string(),
@@ -291,13 +229,13 @@ impl App {
                 initialized: self.rag.initialized,
                 chunk_count: self.rag.chunk_count,
             },
-            input_buffer: self.input.clone(),
+            input_buffer: self.ui.input.clone(),
         }
     }
 
     /// Write debug dump to file (called on each tick when debug_mode is on)
     pub fn write_debug_dump(&self) {
-        if !self.debug_mode {
+        if !self.ui.debug_mode {
             return;
         }
         let dump = self.create_debug_dump();
@@ -340,15 +278,15 @@ impl App {
 
     /// Check if command popup should be shown
     pub fn showing_command_popup(&self) -> bool {
-        self.input.starts_with('/') && !self.input.contains(' ')
+        self.ui.input.starts_with('/') && !self.ui.input.contains(' ')
     }
 
     /// Get filtered commands based on current input
     pub fn get_filtered_commands(&self) -> Vec<(&'static str, &'static str)> {
-        if !self.input.starts_with('/') {
+        if !self.ui.input.starts_with('/') {
             return vec![];
         }
-        let filter = &self.input[1..];
+        let filter = &self.ui.input[1..];
         COMMANDS
             .iter()
             .filter(|(cmd, _)| cmd[1..].starts_with(filter))
@@ -364,7 +302,7 @@ impl App {
         }
 
         // Cycle: None -> last command -> ... -> 0 -> None
-        self.command_selection = match self.command_selection {
+        self.ui.command_selection = match self.ui.command_selection {
             None => Some(filtered.len() - 1),
             Some(0) => None,
             Some(n) => Some(n - 1),
@@ -379,7 +317,7 @@ impl App {
         }
 
         // Cycle: None -> 0 -> 1 -> ... -> last -> None
-        self.command_selection = match self.command_selection {
+        self.ui.command_selection = match self.ui.command_selection {
             None => Some(0),
             Some(n) if n >= filtered.len() - 1 => None,
             Some(n) => Some(n + 1),
@@ -388,18 +326,18 @@ impl App {
 
     /// Apply selected command to input
     pub fn apply_command_selection(&mut self) {
-        if let Some(idx) = self.command_selection {
+        if let Some(idx) = self.ui.command_selection {
             let filtered = self.get_filtered_commands();
             if let Some((cmd, _)) = filtered.get(idx) {
-                self.input = cmd.to_string();
+                self.ui.input = cmd.to_string();
             }
         }
-        self.command_selection = None;
+        self.ui.command_selection = None;
     }
 
     /// Reset command selection when input changes
     pub fn reset_command_selection(&mut self) {
-        self.command_selection = None;
+        self.ui.command_selection = None;
     }
 
     pub fn start_backend(&mut self) -> Result<(), BackendError> {
@@ -411,10 +349,10 @@ impl App {
         let cwd_name = self.cwd_name().to_string();
         match self.backend.create_session(Some(&cwd_name), Some(&cwd_str)) {
             Ok(_session) => {
-                self.status_message = Some(format!("Connected: {}", cwd_name));
+                self.ui.status_message = Some(format!("Connected: {}", cwd_name));
             }
             Err(e) => {
-                self.status_message = Some(format!("Session error: {}", e));
+                self.ui.status_message = Some(format!("Session error: {}", e));
             }
         }
 
@@ -428,28 +366,28 @@ impl App {
         self.animation_tick += 1;
         // Update animation frame every tick for smooth 60fps animation
         // Using larger modulo (360) for smoother color transitions
-        self.animation_frame = (self.animation_frame + 1) % 360;
+        self.animation_frame = (self.animation_frame + 1) % self.config.animation_frame_mod;
 
         // Clear status message after ~3 seconds (180 ticks at 16ms)
-        if self.animation_tick % 180 == 0 {
-            self.status_message = None;
+        if self.animation_tick % self.config.status_timeout_ticks == 0 {
+            self.ui.status_message = None;
         }
 
         // Write debug dump every ~500ms when debug mode is enabled
-        if self.debug_mode && self.animation_tick % 30 == 0 {
+        if self.ui.debug_mode && self.animation_tick % self.config.debug_dump_interval_ticks == 0 {
             self.write_debug_dump();
         }
 
         // Auto-hide activity log after ~2 seconds when no pending activities
-        if self.activity.visible && !self.activity.has_pending() && !self.is_loading {
-            if self.animation_tick % 120 == 0 {
+        if self.activity.visible && !self.activity.has_pending() && !self.ui.is_loading {
+            if self.animation_tick % self.config.activity_log_autohide_ticks == 0 {
                 self.activity.hide();
             }
         }
 
         // Decrement send animation counter
-        if self.send_animation > 0 {
-            self.send_animation = self.send_animation.saturating_sub(1);
+        if self.ui.send_animation > 0 {
+            self.ui.send_animation = self.ui.send_animation.saturating_sub(1);
         }
 
         // Poll for streaming updates
@@ -480,7 +418,7 @@ impl App {
                 }
                 Ok(StreamEvent::Done { tokens }) => {
                     // Streaming complete
-                    self.is_loading = false;
+                    self.ui.is_loading = false;
                     self.stream_receiver = None;
                     self.streaming_content.clear();
                     self.backend.clear_stream();
@@ -502,7 +440,7 @@ impl App {
                 }
                 Err(TryRecvError::Disconnected) => {
                     // Stream ended unexpectedly
-                    self.is_loading = false;
+                    self.ui.is_loading = false;
                     self.stream_receiver = None;
                     self.streaming_content.clear();
                     self.backend.clear_stream();
@@ -514,27 +452,27 @@ impl App {
     }
 
     pub fn submit_message(&mut self) {
-        if self.input.trim().is_empty() {
+        if self.ui.input.trim().is_empty() {
             return;
         }
 
         // Handle slash commands locally
-        if self.input.starts_with('/') {
+        if self.ui.input.starts_with('/') {
             self.handle_command();
             return;
         }
 
         let user_msg = Message {
             role: Role::User,
-            content: self.input.clone(),
+            content: self.ui.input.clone(),
             timestamp: Utc::now(),
         };
         self.messages.push_back(user_msg);
-        let user_input = self.input.clone();
-        self.input.clear();
-        self.is_loading = true;
-        self.send_animation = 20; // ~320ms animation at 60fps
-        self.scroll_offset = 0;   // Scroll to bottom on send
+        let user_input = self.ui.input.clone();
+        self.ui.input.clear();
+        self.ui.is_loading = true;
+        self.ui.send_animation = self.config.send_animation_ticks; // ~320ms animation at 60fps
+        self.ui.scroll_offset = 0;   // Scroll to bottom on send
 
         // Show activity
         self.activity.clear();
@@ -568,7 +506,7 @@ impl App {
                 }
                 Err(e) => {
                     self.activity.complete_last();
-                    self.is_loading = false;
+                    self.ui.is_loading = false;
                     let error_msg = Message {
                         role: Role::System,
                         content: format!("Error: {}", e),
@@ -598,37 +536,45 @@ impl App {
         self.scroll_offset = 0;
     }
 
+    fn add_system_message(&mut self, content: &str) {
+        let system_msg = Message {
+            role: Role::System,
+            content: content.to_string(),
+            timestamp: Utc::now(),
+        };
+        self.messages.push_back(system_msg);
+    }
+
     /// Handle slash commands locally
     fn handle_command(&mut self) {
-        let cmd = self.input.trim();
-        let (command, args) = cmd.split_once(' ').unwrap_or((cmd, ""));
-        let args = args.trim();
+        match CommandParser::parse(&self.input) {
+            Ok(action) => self.process_action(action),
+            Err(msg) => self.add_system_message(&msg),
+        }
+        self.input.clear();
+        self.scroll_offset = 0;
+    }
 
-        let response = match command {
-            "/help" => {
+    /// Process a parsed action
+    fn process_action(&mut self, action: Action) {
+        match action {
+            Action::Help => {
                 let mut help_text = String::from("Available commands:\n");
                 for (cmd, desc) in COMMANDS {
                     help_text.push_str(&format!("  {} - {}\n", cmd, desc));
                 }
-                help_text
+                self.add_system_message(&help_text);
             }
-            "/clear" => {
+            Action::ClearHistory => {
                 self.messages.clear();
-                self.input.clear();
                 self.status_message = Some("Chat cleared".to_string());
-                return;
             }
-            "/init" => {
+            Action::InitCodebase { clear } => {
                 if !self.backend_connected {
-                    "Error: Backend not connected".to_string()
+                    self.add_system_message("Error: Backend not connected");
                 } else {
-                    // Use current cwd, optionally clear existing
-                    let clear = args == "--clear" || args == "-c";
                     let cwd_str = self.cwd.to_string_lossy().to_string();
-
                     self.status_message = Some("Indexing codebase...".to_string());
-
-                    // Show activity
                     self.activity.clear();
                     self.activity.push("Scanning codebase...");
 
@@ -636,7 +582,7 @@ impl App {
                         Ok(response) => {
                             self.activity.complete_last();
                             if let Some(err) = response.error {
-                                format!("Init error: {}", err)
+                                self.add_system_message(&format!("Init error: {}", err));
                             } else {
                                 self.activity.push("Extracting code semantics...");
                                 self.activity.complete_last();
@@ -658,44 +604,41 @@ impl App {
                                 if let Some(msg) = response.message {
                                     output.push_str(&format!("  {}", msg));
                                 }
-                                output
+                                self.add_system_message(&output);
                             }
                         }
                         Err(e) => {
                             self.activity.complete_last();
-                            format!("Init failed: {}", e)
+                            self.add_system_message(&format!("Init failed: {}", e));
                         }
                     }
                 }
             }
-            "/rag" => {
+            Action::ShowRagStatus => {
                 self.refresh_rag_status();
                 if self.rag.initialized {
-                    format!(
+                    self.add_system_message(&format!(
                         "RAG Status:\n  Initialized: Yes\n  Chunks indexed: {}\n  Ready for queries",
                         self.rag.chunk_count
-                    )
+                    ));
                 } else {
-                    "RAG Status:\n  Initialized: No\n  Use /init to index the codebase".to_string()
+                    self.add_system_message("RAG Status:\n  Initialized: No\n  Use /init to index the codebase");
                 }
             }
-            "/search" => {
-                if args.is_empty() {
-                    "Usage: /search <query>\n  Example: /search authentication middleware".to_string()
-                } else if !self.backend_connected {
-                    "Error: Backend not connected".to_string()
+            Action::Search { query } => {
+                if !self.backend_connected {
+                    self.add_system_message("Error: Backend not connected");
                 } else {
-                    // Show activity
                     self.activity.clear();
                     self.activity.push("Searching codebase...");
 
-                    match self.backend.rag_search(args, Some(5)) {
+                    match self.backend.rag_search(&query, Some(5)) {
                         Ok(response) => {
                             self.activity.complete_last();
                             if let Some(err) = response.error {
-                                format!("Search error: {}", err)
+                                self.add_system_message(&format!("Search error: {}", err));
                             } else if response.results.is_empty() {
-                                "No results found".to_string()
+                                self.add_system_message("No results found");
                             } else {
                                 let mut output = format!("Found {} results:\n", response.count);
                                 for (i, r) in response.results.iter().enumerate() {
@@ -708,42 +651,40 @@ impl App {
                                         r.relevance * 100.0
                                     ));
                                 }
-                                output
+                                self.add_system_message(&output);
                             }
                         }
                         Err(e) => {
                             self.activity.complete_last();
-                            format!("Search failed: {}", e)
+                            self.add_system_message(&format!("Search failed: {}", e));
                         }
                     }
                 }
             }
-            "/ingest" => {
-                if args.is_empty() {
-                    "Usage: /ingest <json_path>\n  Example: /ingest ./specs/codebase.json".to_string()
-                } else if !self.backend_connected {
-                    "Error: Backend not connected".to_string()
+            Action::Ingest { path } => {
+                if !self.backend_connected {
+                    self.add_system_message("Error: Backend not connected");
                 } else {
-                    match self.backend.rag_ingest_json(args) {
+                    match self.backend.rag_ingest_json(&path) {
                         Ok(response) => {
                             if let Some(err) = response.error {
-                                format!("Ingest error: {}", err)
+                                self.add_system_message(&format!("Ingest error: {}", err));
                             } else {
                                 self.refresh_rag_status();
-                                format!(
+                                self.add_system_message(&format!(
                                     "Ingested {} chunks from {}\nTotal chunks: {}",
                                     response.ingested,
                                     response.source.unwrap_or_default(),
                                     self.rag.chunk_count
-                                )
+                                ));
                             }
                         }
-                        Err(e) => format!("Ingest failed: {}", e),
+                        Err(e) => self.add_system_message(&format!("Ingest failed: {}", e)),
                     }
                 }
             }
-            "/session" => {
-                format!(
+            Action::ShowSessionInfo => {
+                self.add_system_message(&format!(
                     "Session info:\n  Project: {}\n  Path: {}\n  Messages: {}\n  Tokens: {}\n  Cost: ${:.4}\n  Status: {}\n  RAG: {} chunks",
                     self.cwd_name(),
                     self.cwd.display(),
@@ -752,13 +693,27 @@ impl App {
                     self.tokens.cost_usd,
                     if self.backend_connected { "Connected" } else { "Offline" },
                     self.rag.chunk_count
-                )
+                ));
             }
-            "/model" => {
+            Action::Model { id } => {
                 if !self.backend_connected {
-                    "Error: Backend not connected".to_string()
-                } else if args.is_empty() {
-                    // Show current model and list available
+                    self.add_system_message("Error: Backend not connected");
+                } else if let Some(model_id) = id {
+                    // Set model
+                    match self.backend.model_set(&model_id) {
+                        Ok(resp) => {
+                            if let Some(err) = resp.error {
+                                self.add_system_message(&format!("Error: {}", err));
+                            } else {
+                                let new_model = resp.model.unwrap_or_else(|| model_id.clone());
+                                let prev = resp.previous.unwrap_or_else(|| "unknown".to_string());
+                                self.add_system_message(&format!("Model changed: {} -> {}", prev, new_model));
+                            }
+                        }
+                        Err(e) => self.add_system_message(&format!("Failed to set model: {}", e)),
+                    }
+                } else {
+                    // List models
                     let current = match self.backend.model_get() {
                         Ok(resp) => resp.model.unwrap_or_else(|| "unknown".to_string()),
                         Err(_) => "unknown".to_string(),
@@ -773,45 +728,31 @@ impl App {
                         }
                     }
                     output.push_str("\nUsage: /model <model_id>");
-                    output
-                } else {
-                    // Set the model
-                    match self.backend.model_set(args) {
-                        Ok(resp) => {
-                            if let Some(err) = resp.error {
-                                format!("Error: {}", err)
-                            } else {
-                                let new_model = resp.model.unwrap_or_else(|| args.to_string());
-                                let prev = resp.previous.unwrap_or_else(|| "unknown".to_string());
-                                format!("Model changed: {} -> {}", prev, new_model)
-                            }
-                        }
-                        Err(e) => format!("Failed to set model: {}", e),
-                    }
+                    self.add_system_message(&output);
                 }
             }
-            "/budget" => {
+            Action::ShowBudget => {
                 if let Some(budget) = self.tokens.budget {
-                    format!(
+                    self.add_system_message(&format!(
                         "Token budget: {}\n  Used: {} ({:.1}%)\n  Remaining: {}",
                         budget,
                         self.tokens.session_total,
                         self.tokens.budget_percentage().unwrap_or(0.0),
                         budget.saturating_sub(self.tokens.session_total)
-                    )
+                    ));
                 } else {
-                    "No budget set. Use /budget <tokens> to set one.".to_string()
+                    self.add_system_message("No budget set. Use /budget <tokens> to set one.");
                 }
             }
-            "/debug" => {
+            Action::ToggleDebug => {
                 self.debug_mode = !self.debug_mode;
                 if self.debug_mode {
-                    "Debug overlay ENABLED\n  Press /debug again to close".to_string()
+                    self.add_system_message("Debug overlay ENABLED\n  Press /debug again to close");
                 } else {
-                    "Debug overlay DISABLED".to_string()
+                    self.add_system_message("Debug overlay DISABLED");
                 }
             }
-            "/copy" => {
+            Action::ExportChat => {
                 // Export chat to a readable text file
                 let export_path = self.cwd.join(".openagent-chat.txt");
                 let mut content = String::new();
@@ -834,83 +775,74 @@ impl App {
                 }
 
                 match fs::write(&export_path, &content) {
-                    Ok(_) => format!(
+                    Ok(_) => self.add_system_message(&format!(
                         "Chat exported to:\n  {}\n\n  {} messages, {} bytes\n  Ready to copy!",
                         export_path.display(),
                         self.messages.len(),
                         content.len()
-                    ),
-                    Err(e) => format!("Export failed: {}", e),
+                    )),
+                    Err(e) => self.add_system_message(&format!("Export failed: {}", e)),
                 }
             }
-            "/quit" => {
-                self.input.clear();
+            Action::Quit => {
                 self.status_message = Some("Use ESC or Ctrl+C to quit".to_string());
-                return;
             }
-            _ => {
-                format!("Unknown command: {}. Type /help for available commands.", command)
+            Action::SystemMessage(msg) => {
+                self.add_system_message(&msg);
             }
-        };
-
-        let system_msg = Message {
-            role: Role::System,
-            content: response,
-            timestamp: Utc::now(),
-        };
-        self.messages.push_back(system_msg);
-        self.input.clear();
-        self.scroll_offset = 0;
+        }
     }
 
     pub fn scroll_up(&mut self) {
         // Scroll up - UI will clamp to actual max based on rendered line count
         // Use generous upper bound (~50 lines per message for long responses)
         // The UI's clamped_offset handles the real limit
-        let max_offset = self.messages.len().saturating_mul(50).max(1000);
-        if self.scroll_offset < max_offset {
-            self.scroll_offset += 3;
+        let max_offset = self.messages.len()
+            .saturating_mul(self.config.scroll_lines_per_message)
+            .max(self.config.scroll_min_buffer);
+        if self.ui.scroll_offset < max_offset {
+            self.ui.scroll_offset += self.config.scroll_step;
         }
     }
 
     pub fn scroll_down(&mut self) {
         // Scroll towards bottom (offset 0 = at bottom)
-        self.scroll_offset = self.scroll_offset.saturating_sub(3);
+        self.ui.scroll_offset = self.ui.scroll_offset.saturating_sub(self.config.scroll_step);
     }
 
     /// Toggle visualization panel
     pub fn toggle_visualization(&mut self) {
-        self.show_visualization = !self.show_visualization;
-        if self.show_visualization {
+        self.ui.show_visualization = !self.ui.show_visualization;
+        if self.ui.show_visualization {
             self.load_embeddings();
-            self.focus = Focus::Visualization;
+            self.ui.focus = Focus::Visualization;
         } else {
-            self.focus = Focus::Input;
+            self.ui.focus = Focus::Input;
         }
     }
 
     /// Load embeddings from backend
     pub fn load_embeddings(&mut self) {
         if !self.backend_connected {
-            self.status_message = Some("Cannot load embeddings: backend not connected".to_string());
+            self.ui.status_message = Some("Cannot load embeddings: backend not connected".to_string());
             return;
         }
 
         match self.backend.rag_embeddings() {
             Ok(response) => {
                 if let Some(err) = response.error {
-                    self.status_message = Some(format!("Embeddings error: {}", err));
+                    self.ui.status_message = Some(format!("Embeddings error: {}", err));
                     self.embedding_points.clear();
                 } else if response.points.is_empty() {
-                    self.status_message = Some("No embeddings found. Use /init to index codebase.".to_string());
+                    self.ui.status_message = Some("No embeddings found. Use /init to index codebase.".to_string());
                     self.embedding_points.clear();
                 } else {
-                    self.status_message = Some(format!("Loaded {} embeddings", response.points.len()));
+                    self.ui.status_message = Some(format!("Loaded {} embeddings", response.points.len()));
                     self.embedding_points = response.points;
                 }
             }
             Err(e) => {
-                self.status_message = Some(format!("Failed to load embeddings: {}", e));
+                self.ui.status_message = Some(format!("Failed to load embeddings: {}", e));
                 self.embedding_points.clear();
             }
         }

@@ -1,5 +1,6 @@
 """Conversation history management."""
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -43,11 +44,83 @@ class Message:
         )
 
 
-class ConversationHistory:
-    """Manages message history for a session."""
+class ConversationHistory(ABC):
+    """Abstract base class for conversation history storage."""
+
+    def __init__(self, session: Session):
+        self.session = session
+
+    @abstractmethod
+    def add(
+        self,
+        role: Role,
+        content: str,
+        token_count: int = 0,
+        metadata: dict | None = None,
+    ) -> Message:
+        """Add a message to the history."""
+        ...
+
+    @abstractmethod
+    def get_all(self) -> list[Message]:
+        """Get all messages in session."""
+        ...
+
+    @abstractmethod
+    def get_recent(self, limit: int = 20) -> list[Message]:
+        """Get most recent messages."""
+        ...
+
+    @abstractmethod
+    def count(self) -> int:
+        """Get total message count in session."""
+        ...
+
+    @abstractmethod
+    def clear(self, keep_system: bool = True) -> int:
+        """Clear message history."""
+        ...
+
+    @abstractmethod
+    def get_total_tokens(self) -> int:
+        """Get total tokens used in this session."""
+        ...
+
+    def get_by_token_budget(self, max_tokens: int) -> list[Message]:
+        """
+        Get messages that fit within token budget.
+
+        Prioritizes most recent messages.
+        Base implementation using get_all(), can be overridden.
+        """
+        messages = self.get_all()
+        result = []
+        total_tokens = 0
+
+        # Start from most recent
+        for message in reversed(messages):
+            if total_tokens + message.token_count <= max_tokens:
+                result.insert(0, message)
+                total_tokens += message.token_count
+            elif message.role == "system":
+                # Always include system messages
+                result.insert(0, message)
+                total_tokens += message.token_count
+
+        return result
+
+    def to_llm_format(self, messages: list[Message] | None = None) -> list[dict]:
+        """Convert messages to LLM API format."""
+        if messages is None:
+            messages = self.get_all()
+        return [m.to_dict() for m in messages]
+
+
+class SQLiteConversationHistory(ConversationHistory):
+    """SQLite implementation of conversation history."""
 
     def __init__(self, session: Session, db_path: Path | str):
-        self.session = session
+        super().__init__(session)
         self.db_path = Path(db_path)
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -122,34 +195,6 @@ class ConversationHistory:
             # Reverse to get chronological order
             rows = cursor.fetchall()
             return [Message.from_row(row) for row in reversed(rows)]
-
-    def get_by_token_budget(self, max_tokens: int) -> list[Message]:
-        """
-        Get messages that fit within token budget.
-
-        Prioritizes most recent messages.
-        """
-        messages = self.get_all()
-        result = []
-        total_tokens = 0
-
-        # Start from most recent
-        for message in reversed(messages):
-            if total_tokens + message.token_count <= max_tokens:
-                result.insert(0, message)
-                total_tokens += message.token_count
-            elif message.role == "system":
-                # Always include system messages
-                result.insert(0, message)
-                total_tokens += message.token_count
-
-        return result
-
-    def to_llm_format(self, messages: list[Message] | None = None) -> list[dict]:
-        """Convert messages to LLM API format."""
-        if messages is None:
-            messages = self.get_all()
-        return [m.to_dict() for m in messages]
 
     def count(self) -> int:
         """Get total message count in session."""

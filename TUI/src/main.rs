@@ -1,7 +1,11 @@
+mod action;
 mod app;
 mod backend;
+mod command;
+mod config;
 mod markdown;
 mod ui;
+mod ui_state;
 
 use std::env;
 use std::io;
@@ -64,7 +68,7 @@ fn run_app(
         terminal.draw(|frame| draw(frame, app))?;
 
         // Poll for events with timeout (60 FPS for smooth animation)
-        if event::poll(std::time::Duration::from_millis(16))? {
+        if event::poll(std::time::Duration::from_millis(app.config.tick_rate_ms))? {
             match event::read()? {
                 Event::Key(key) => {
                     match app.screen {
@@ -181,8 +185,8 @@ fn run_app(
                         let input_area_start = term_height.saturating_sub(5);
 
                         // Calculate visualization area boundaries (when visible)
-                        // Layout: 1px padding, 26px sidebar, 1px gap, remaining split 50/50
-                        let sidebar_end = 28; // 1 + 26 + 1
+                        // Layout: 1px padding, sidebar_width, 1px gap, remaining split 50/50
+                        let sidebar_end = 1 + app.config.sidebar_width + 1;
                         let chat_area_width = term_width.saturating_sub(sidebar_end + 2);
                         let viz_start = if app.show_visualization {
                             sidebar_end + (chat_area_width / 2) + 1

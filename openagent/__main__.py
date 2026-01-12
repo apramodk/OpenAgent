@@ -37,6 +37,7 @@ def run_server() -> None:
 def run_cli() -> None:
     """Run interactive CLI mode."""
     from openagent.core.agent import Agent, AgentConfig
+    from openagent.core.llm import AzureOpenAIClient
 
     print("OpenAgent CLI v0.1.0")
     print("Type 'quit' or 'exit' to stop.\n")
@@ -44,7 +45,13 @@ def run_cli() -> None:
     config = AgentConfig(
         system_prompt="You are a helpful AI assistant for understanding codebases.",
     )
-    agent = Agent(config=config)
+    try:
+        llm = AzureOpenAIClient()
+        agent = Agent(config=config, llm_client=llm)
+    except Exception as e:
+        print(f"Error initializing: {e}")
+        print("Check your .env file for credentials.")
+        return
 
     while True:
         try:

@@ -4,10 +4,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator
 
-from openagent.core.llm import LLMClient, LLMResponse, AzureOpenAIClient
+from openagent.core.llm import LLMClient, LLMResponse
 from openagent.core.intent import IntentRouter, Intent
 from openagent.memory.session import Session, SessionManager
-from openagent.memory.conversation import ConversationHistory
+from openagent.memory.conversation import ConversationHistory, SQLiteConversationHistory
 from openagent.memory.context import ContextManager, ContextConfig, ContextWindow
 from openagent.telemetry.tokens import TokenTracker, TokenUsage
 
@@ -48,8 +48,8 @@ class Agent:
 
     def __init__(
         self,
+        llm_client: LLMClient,
         config: AgentConfig | None = None,
-        llm_client: LLMClient | None = None,
         intent_router: IntentRouter | None = None,
         token_tracker: TokenTracker | None = None,
         # Persistent mode (optional)
@@ -58,10 +58,7 @@ class Agent:
         context_manager: ContextManager | None = None,
     ):
         self.config = config or AgentConfig()
-        self.llm = llm_client or AzureOpenAIClient(
-            endpoint=self.config.api_endpoint,
-            model=self.config.model,
-        )
+        self.llm = llm_client
         self.intent_router = intent_router
         self.token_tracker = token_tracker
 
@@ -333,6 +330,7 @@ class Agent:
 
 def create_agent(
     db_path: Path | str,
+    llm_client: LLMClient,
     session_id: str | None = None,
     config: AgentConfig | None = None,
     **kwargs,
@@ -342,6 +340,7 @@ def create_agent(
 
     Args:
         db_path: Path to SQLite database
+        llm_client: LLM client instance
         session_id: Existing session ID to load (creates new if None)
         config: Agent configuration
         **kwargs: Additional arguments passed to Agent
@@ -363,7 +362,7 @@ def create_agent(
         session = session_manager.create()
 
     # Components
-    conversation = ConversationHistory(session, db_path)
+    conversation = SQLiteConversationHistory(session, db_path)
     token_tracker = TokenTracker(session.id, db_path, budget=config.token_budget)
     context_manager = ContextManager(
         ContextConfig(
@@ -373,6 +372,7 @@ def create_agent(
     )
 
     return Agent(
+        llm_client=llm_client,
         config=config,
         session=session,
         conversation=conversation,

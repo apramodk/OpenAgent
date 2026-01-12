@@ -73,6 +73,9 @@ class Config:
         2. Config file
         3. Defaults
         """
+        from dotenv import load_dotenv
+        load_dotenv()
+
         config = cls()
 
         # Try to load from file
@@ -152,14 +155,21 @@ class Config:
     def _apply_env_overrides(cls, config: "Config") -> "Config":
         """Apply environment variable overrides."""
         # LLM config
+        if oai_endpoint := os.environ.get("PROJECT_ENDPOINT_OAI"):
+            parts = oai_endpoint.split("/openai/")
+            if parts:
+                config.llm.endpoint = parts[0]
+
         if endpoint := os.environ.get("PROJECT_ENDPOINT"):
             config.llm.endpoint = endpoint
         if endpoint := os.environ.get("AZURE_OPENAI_ENDPOINT"):
             config.llm.endpoint = endpoint
+        
         if key := os.environ.get("AZURE_KEY"):
             config.llm.api_key = key
         if key := os.environ.get("AZURE_OPENAI_KEY"):
             config.llm.api_key = key
+            
         if model := os.environ.get("MODEL_DEPLOYMENT_NAME"):
             config.llm.model = model
 

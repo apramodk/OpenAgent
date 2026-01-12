@@ -49,7 +49,7 @@ class TestToolAgentInit:
     @patch("openagent.core.tool_agent.register_builtin_tools")
     def test_default_init(self, mock_register):
         """Test default initialization."""
-        agent = ToolAgent()
+        agent = ToolAgent(llm_client=MagicMock())
 
         assert agent.tool_config is not None
         assert agent.registry is not None
@@ -66,7 +66,7 @@ class TestToolAgentInit:
     def test_custom_registry(self, mock_register):
         """Test with custom registry."""
         registry = ToolRegistry()
-        agent = ToolAgent(registry=registry)
+        agent = ToolAgent(registry=registry, llm_client=MagicMock())
 
         assert agent.registry is registry
 
@@ -78,7 +78,7 @@ class TestToolAgentInit:
             enable_shell=False,
             enable_git=False,
         )
-        agent = ToolAgent(config=config)
+        agent = ToolAgent(config=config, llm_client=MagicMock())
 
         # Should not call register_builtin_tools when no categories
         mock_register.assert_not_called()
@@ -94,7 +94,8 @@ class TestToolPromptGeneration:
                 enable_filesystem=False,
                 enable_shell=False,
                 enable_git=False,
-            )
+            ),
+            llm_client=MagicMock(),
         )
         prompt = agent._get_tool_prompt()
         assert prompt == ""
@@ -121,6 +122,7 @@ class TestToolPromptGeneration:
                 enable_git=False,
             ),
             registry=registry,
+            llm_client=MagicMock(),
         )
 
         prompt = agent._get_tool_prompt()
@@ -142,7 +144,8 @@ class TestToolCallParsing:
                 enable_filesystem=False,
                 enable_shell=False,
                 enable_git=False,
-            )
+            ),
+            llm_client=MagicMock(),
         )
 
     def test_parse_valid_tool_call(self):
@@ -213,7 +216,8 @@ class TestChatWithTools:
                 enable_filesystem=False,
                 enable_shell=False,
                 enable_git=False,
-            )
+            ),
+            llm_client=MagicMock(),
         )
         return agent
 
@@ -311,7 +315,8 @@ class TestListTools:
                 enable_filesystem=False,
                 enable_shell=False,
                 enable_git=False,
-            )
+            ),
+            llm_client=MagicMock(),
         )
         tools = agent.list_tools()
         assert tools == []
@@ -337,6 +342,7 @@ class TestListTools:
                 enable_git=False,
             ),
             registry=registry,
+            llm_client=MagicMock(),
         )
 
         tools = agent.list_tools()
@@ -357,7 +363,8 @@ class TestIntegrationWithBuiltinTools:
                 enable_filesystem=True,
                 enable_shell=False,
                 enable_git=False,
-            )
+            ),
+            llm_client=MagicMock(),
         )
 
         tools = agent.list_tools()
@@ -374,7 +381,8 @@ class TestIntegrationWithBuiltinTools:
                 enable_filesystem=False,
                 enable_shell=False,
                 enable_git=True,
-            )
+            ),
+            llm_client=MagicMock(),
         )
 
         tools = agent.list_tools()
@@ -390,7 +398,8 @@ class TestIntegrationWithBuiltinTools:
                 enable_filesystem=False,
                 enable_shell=True,
                 enable_git=False,
-            )
+            ),
+            llm_client=MagicMock(),
         )
 
         tools = agent.list_tools()
