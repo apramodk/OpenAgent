@@ -6,8 +6,10 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, Role, Screen, COMING_SOON};
+use crate::app::{App, Role};
+use crate::ui_state::Screen;
 use crate::markdown;
+use crate::config::COMING_SOON;
 
 // Copper Sapphire Morning color palette
 const BG_DARK: Color = Color::Rgb(12, 12, 16);           // Deep background
@@ -65,7 +67,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let bg = Block::default().style(Style::default().bg(BG_DARK));
     frame.render_widget(bg, frame.area());
 
-    match app.screen {
+    match app.ui.screen {
         Screen::Home => draw_home(frame, app),
         Screen::Chat => draw_chat(frame, app),
     }
@@ -297,7 +299,7 @@ fn draw_chat(frame: &mut Frame, app: &App) {
     }
 
     // Draw debug overlay if enabled
-    if app.debug_mode {
+    if app.ui.debug_mode {
         draw_debug_overlay(frame, app, area);
     }
 }
@@ -484,7 +486,7 @@ fn draw_coming_soon(frame: &mut Frame, app: &App, area: Rect) {
     let max_items = items_available.min(COMING_SOON.len());
     let mut lines: Vec<Line> = Vec::new();
 
-    for (i, feature) in COMING_SOON.iter().take(max_items).enumerate() {
+    for (i, &feature) in COMING_SOON.iter().take(max_items).enumerate() {
         // Each item gets a different phase offset for the animation
         let bullet_idx = ((app.animation_frame / 20) + i * 2) % bullet_shapes.len();
         let bullet = bullet_shapes[bullet_idx];
@@ -777,13 +779,13 @@ fn draw_chat_area(frame: &mut Frame, app: &App, area: Rect) {
     // Calculate input height based on content (min 3, max 8)
     let input_width = area.width.saturating_sub(6) as usize; // Account for borders and prompt
     let input_lines = if input_width > 0 {
-        (app.input.len() / input_width) + 1
+        (app.ui.input.len() / input_width) + 1
     } else {
         1
     };
     let input_height = (input_lines as u16 + 2).clamp(3, 8); // +2 for borders
 
-    if app.show_visualization {
+    if app.ui.show_visualization {
         // Split horizontally: chat on left, visualization on right
         let h_chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -826,17 +828,17 @@ fn draw_chat_area(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
-    use crate::app::Focus;
+    use crate::ui_state::Focus;
 
     // Border color based on focus and animation
-    let border_color = if app.send_animation > 0 {
+    let border_color = if app.ui.send_animation > 0 {
         // Animate border on send
-        let intensity = app.send_animation as f64 / 20.0;
+        let intensity = app.ui.send_animation as f64 / 20.0;
         let r = (101.0 + (154.0 * intensity)) as u8;
         let g = (150.0 + (70.0 * intensity)) as u8;
         let b = (243.0 - (17.0 * intensity)) as u8;
         Color::Rgb(r, g, b)
-    } else if app.focus == Focus::Chat {
+    } else if app.ui.focus == Focus::Chat {
         SAPPHIRE  // Highlighted when focused
     } else {
         BORDER_DIM
@@ -968,8 +970,8 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
         let is_last_user_msg = msg_idx == msg_count - 1 && matches!(msg.role, Role::User);
 
         // Slide-in effect for the last sent message
-        let slide_offset = if is_last_user_msg && app.send_animation > 10 {
-            20 - (20 - app.send_animation) as usize
+        let slide_offset = if is_last_user_msg && app.ui.send_animation > 10 {
+            20 - (20 - app.ui.send_animation) as usize
         } else {
             0
         };
@@ -1011,8 +1013,8 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
             }
 
             // Top border: ╭─[toggle]────────────────────╮
-            let toggle_text = if app.show_raw_markdown { "○ Raw" } else { "◉ Preview" };
-            let toggle_style = if app.show_raw_markdown {
+            let toggle_text = if app.ui.show_raw_markdown { "○ Raw" } else { "◉ Preview" };
+            let toggle_style = if app.ui.show_raw_markdown {
                 Style::default().fg(TEXT_MUTED)
             } else {
                 Style::default().fg(CYAN_LIGHT)
@@ -1032,7 +1034,7 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
             ]));
 
             // Content lines - wrapped text with proper padding
-            let content_lines: Vec<String> = if app.show_raw_markdown {
+            let content_lines: Vec<String> = if app.ui.show_raw_markdown {
                 // Raw mode - show source
                 msg.content.lines()
                     .flat_map(|line| wrap_text(line, inner_width))
@@ -1055,7 +1057,7 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
                     Span::raw(" ".repeat(inner_width)),
                     Span::styled(" │", Style::default().fg(BORDER_ACCENT)),
                 ]));
-            } else if app.show_raw_markdown {
+            } else if app.ui.show_raw_markdown {
                 // Raw mode - code styling with exact padding
                 for line_text in content_lines.iter() {
                     let padded = format!("{:<width$}", line_text, width = inner_width);
@@ -1143,7 +1145,7 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(""));
     }
 
-    if app.is_loading {
+    if app.ui.is_loading {
         let dots = match (app.animation_frame / 15) % 4 {
             0 => ".  ",
             1 => ".. ",
@@ -1162,7 +1164,7 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
 
     // Calculate scroll - scroll from bottom, clamp scroll_offset to valid range
     let max_scroll = total_lines.saturating_sub(visible_height);
-    let clamped_offset = app.scroll_offset.min(max_scroll);
+    let clamped_offset = app.ui.scroll_offset.min(max_scroll);
     let scroll_pos = max_scroll.saturating_sub(clamped_offset);
 
     // No Wrap needed - we handle it manually for proper alignment
@@ -1223,10 +1225,10 @@ fn draw_messages(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
-    use crate::app::Focus;
+    use crate::ui_state::Focus;
 
     // Border color based on focus - pulse when focused, dim when not
-    let border_color = if app.focus == Focus::Input {
+    let border_color = if app.ui.focus == Focus::Input {
         // Pulsing border when focused
         let glow = ((app.animation_frame as f64 / 90.0).sin() * 0.3 + 0.7) as f64;
         let r = (101.0 * glow) as u8;
@@ -1246,7 +1248,7 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
 
     let cursor = if app.animation_frame % 30 < 15 { "|" } else { " " };
-    let input_text = format!(" > {}{}", app.input, cursor);
+    let input_text = format!(" > {}{}", app.ui.input, cursor);
 
     let input = Paragraph::new(input_text)
         .style(Style::default().fg(TEXT_PRIMARY))
@@ -1293,7 +1295,7 @@ fn draw_command_popup(frame: &mut Frame, app: &App, chat_area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
     // First option: current typed input (selected when command_selection is None)
-    let input_selected = app.command_selection.is_none();
+    let input_selected = app.ui.command_selection.is_none();
     let input_style = if input_selected {
         Style::default().fg(CYAN_LIGHT).add_modifier(Modifier::BOLD)
     } else {
@@ -1301,13 +1303,13 @@ fn draw_command_popup(frame: &mut Frame, app: &App, chat_area: Rect) {
     };
     let indicator = if input_selected { ">" } else { " " };
     lines.push(Line::from(vec![
-        Span::styled(format!("{} {} ", indicator, &app.input), input_style),
+        Span::styled(format!("{} {} ", indicator, &app.ui.input), input_style),
         Span::styled("(your input)", Style::default().fg(TEXT_MUTED).add_modifier(Modifier::ITALIC)),
     ]));
 
     // Command options
     for (i, (cmd, desc)) in filtered.iter().enumerate() {
-        let is_selected = app.command_selection == Some(i);
+        let is_selected = app.ui.command_selection == Some(i);
         let style = if is_selected {
             Style::default().fg(CYAN_LIGHT).add_modifier(Modifier::BOLD)
         } else {
@@ -1446,7 +1448,7 @@ fn draw_debug_overlay(frame: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::from(""));
 
     // Input buffer
-    let input_preview: String = app.input.chars().take(35).collect();
+    let input_preview: String = app.ui.input.chars().take(35).collect();
     lines.push(Line::from(vec![
         Span::styled("  Input: ", Style::default().fg(TEXT_MUTED)),
         Span::styled(
@@ -1563,10 +1565,10 @@ fn draw_activity_popup(frame: &mut Frame, app: &App, chat_area: Rect) {
 
 /// Draw the 2D embedding visualization scatter plot
 fn draw_visualization(frame: &mut Frame, app: &App, area: Rect) {
-    use crate::app::Focus;
+    use crate::ui_state::Focus;
 
     // Border color based on focus
-    let border_color = if app.focus == Focus::Visualization {
+    let border_color = if app.ui.focus == Focus::Visualization {
         SAPPHIRE  // Highlighted when focused
     } else {
         BORDER_DIM
@@ -1631,7 +1633,7 @@ fn draw_visualization(frame: &mut Frame, app: &App, area: Rect) {
         for (col_idx, cell) in row.iter().enumerate() {
             match cell {
                 Some(point_idx) => {
-                    let is_hovered = app.hovered_point == Some(*point_idx);
+                    let is_hovered = app.ui.hovered_point == Some(*point_idx);
                     let point = &app.embedding_points[*point_idx];
 
                     // Color based on chunk type and hover state
@@ -1669,7 +1671,7 @@ fn draw_visualization(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(plot, inner);
 
     // Draw tooltip for hovered point (if any)
-    if let Some(idx) = app.hovered_point {
+    if let Some(idx) = app.ui.hovered_point {
         if let Some(point) = app.embedding_points.get(idx) {
             // Position tooltip near the point
             let tooltip_x = (point.x * (plot_width - 1) as f64).round() as u16;

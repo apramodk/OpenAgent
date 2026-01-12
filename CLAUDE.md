@@ -39,6 +39,13 @@ mypy openagent/                       # Type checking
 ```bash
 cargo build --release                 # Build TUI
 cargo test                            # Run Rust tests
+cargo run -- --offline                # Run TUI only (no backend)
+```
+
+### Python Backend Standalone
+```bash
+python -m openagent                   # Interactive CLI mode
+python -m openagent server            # JSON-RPC server mode (for TUI)
 ```
 
 ## Architecture
@@ -75,11 +82,15 @@ Communication flows: `TUI <--JSON-RPC--> Python Server`
 | `ui.rs` | UI rendering (file tree, chat pane, input bar) |
 | `markdown.rs` | Markdown rendering for chat output |
 | `backend.rs` | JSON-RPC communication with Python |
+| `action.rs` | User actions and command handling |
+| `command.rs` | Slash command parsing (/init, /help, etc.) |
+| `ui_state.rs` | UI state machine (screen, focus, modes) |
+| `config.rs` | TUI configuration |
 
 ### Entry Points
 - **CLI Mode**: `openagent.__main__.run_cli()` - Interactive CLI without TUI
 - **Server Mode**: `openagent.__main__.run_server()` - JSON-RPC server for TUI
-- **Factory**: `openagent.core.agent.create_agent()` - Creates configured agent
+- **Command Line**: `python -m openagent` or `python -m openagent server`
 
 ## Key Patterns
 
@@ -92,12 +103,59 @@ DSPy classifies user intents into RESEARCH, ORGANIZE, or CONTROL categories befo
 ### RAG Pipeline
 ChromaDB stores code embeddings for semantic search. The scanner (`rag/scanner.py`) ingests codebases, and queries retrieve relevant context before LLM calls.
 
+## TUI Commands
+
+Slash commands available in the TUI (parsed by `TUI/src/command.rs`):
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show available commands |
+| `/init` | Index current codebase for semantic search |
+| `/rag` | Check RAG indexing status |
+| `/clear` | Clear chat history |
+| `/quit` or `/exit` | Exit the application |
+
+## JSON-RPC Communication
+
+The TUI and backend communicate over stdio using JSON-RPC 2.0:
+- **Server**: `openagent/server/jsonrpc.py` - Handles async I/O with stdio
+- **Client**: `TUI/src/backend.rs` - Sends requests and handles streaming responses
+- **Protocol**: `openagent/server/protocol.py` - Request/response types
+- **Handlers**: `openagent/server/handlers.py` - RPC method implementations
+
+Key RPC methods:
+- `agent.chat` - Send message, receive streaming response
+- `rag.init` - Initialize codebase indexing
+- `rag.status` - Get RAG system status
+
 ## Configuration
 
-- Environment: `.env` file (see `.env.example` for Azure OpenAI setup)
-- Python: `pyproject.toml` (deps, pytest, black, ruff, mypy settings)
-- Rust: `TUI/Cargo.toml`
+### Environment Variables
+Configure via `.env` file (copy from `.env.example`):
 
-## Database Schema (SQLite)
+**Required:**
+- `AZURE_OPENAI_ENDPOINT` - Azure OpenAI resource endpoint
+- `AZURE_KEY` or `AZURE_OPENAI_KEY` - API key
+- `MODEL_DEPLOYMENT_NAME` - Deployment name (e.g., gpt-4o, gpt-4)
 
-Sessions, messages, and token usage are persisted with schema in `memory/session.py`.
+**Optional:**
+- `PROJECT_ENDPOINT_OAI` - Alternative Azure AI Foundry endpoint format
+- `OPENAGENT_SESSION_DB` - Custom session database path (default: `~/.local/share/openagent/sessions.db`)
+
+### Build Configuration
+- **Python**: `pyproject.toml` - Dependencies, pytest, black, ruff, mypy settings
+- **Rust**: `TUI/Cargo.toml` - TUI dependencies (ratatui, crossterm, tokio)
+
+## Data Persistence
+
+### Session Database (SQLite)
+Located at `~/.local/share/openagent/sessions.db` by default. Schema managed in `memory/session.py`.
+- Stores conversation history
+- Tracks token usage and costs
+- Persists across TUI restarts
+
+### ChromaDB Vector Store
+Located at `.chromadb/` (default). Created when running `/init` command in TUI.
+- Stores code embeddings for semantic search
+- Indexed by `rag/scanner.py`
+- Queried by `rag/query.py`

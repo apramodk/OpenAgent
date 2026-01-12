@@ -532,8 +532,8 @@ impl App {
             self.tokens.cost_usd += 0.001;
         }
 
-        self.is_loading = false;
-        self.scroll_offset = 0;
+        self.ui.is_loading = false;
+        self.ui.scroll_offset = 0;
     }
 
     fn add_system_message(&mut self, content: &str) {
@@ -547,12 +547,12 @@ impl App {
 
     /// Handle slash commands locally
     fn handle_command(&mut self) {
-        match CommandParser::parse(&self.input) {
+        match CommandParser::parse(&self.ui.input) {
             Ok(action) => self.process_action(action),
             Err(msg) => self.add_system_message(&msg),
         }
-        self.input.clear();
-        self.scroll_offset = 0;
+        self.ui.input.clear();
+        self.ui.scroll_offset = 0;
     }
 
     /// Process a parsed action
@@ -567,14 +567,14 @@ impl App {
             }
             Action::ClearHistory => {
                 self.messages.clear();
-                self.status_message = Some("Chat cleared".to_string());
+                self.ui.status_message = Some("Chat cleared".to_string());
             }
             Action::InitCodebase { clear } => {
                 if !self.backend_connected {
                     self.add_system_message("Error: Backend not connected");
                 } else {
                     let cwd_str = self.cwd.to_string_lossy().to_string();
-                    self.status_message = Some("Indexing codebase...".to_string());
+                    self.ui.status_message = Some("Indexing codebase...".to_string());
                     self.activity.clear();
                     self.activity.push("Scanning codebase...");
 
@@ -745,8 +745,8 @@ impl App {
                 }
             }
             Action::ToggleDebug => {
-                self.debug_mode = !self.debug_mode;
-                if self.debug_mode {
+                self.ui.debug_mode = !self.ui.debug_mode;
+                if self.ui.debug_mode {
                     self.add_system_message("Debug overlay ENABLED\n  Press /debug again to close");
                 } else {
                     self.add_system_message("Debug overlay DISABLED");
@@ -785,7 +785,7 @@ impl App {
                 }
             }
             Action::Quit => {
-                self.status_message = Some("Use ESC or Ctrl+C to quit".to_string());
+                self.ui.status_message = Some("Use ESC or Ctrl+C to quit".to_string());
             }
             Action::SystemMessage(msg) => {
                 self.add_system_message(&msg);
@@ -850,10 +850,10 @@ impl App {
 
     /// Cycle focus between panels
     pub fn cycle_focus(&mut self) {
-        self.focus = match self.focus {
+        self.ui.focus = match self.ui.focus {
             Focus::Input => Focus::Chat,
             Focus::Chat => {
-                if self.show_visualization {
+                if self.ui.show_visualization {
                     Focus::Visualization
                 } else {
                     Focus::Input
@@ -877,9 +877,9 @@ impl App {
 
     /// Toggle between raw markdown and rendered preview
     pub fn toggle_markdown_mode(&mut self) {
-        self.show_raw_markdown = !self.show_raw_markdown;
-        self.status_message = Some(
-            if self.show_raw_markdown {
+        self.ui.show_raw_markdown = !self.ui.show_raw_markdown;
+        self.ui.status_message = Some(
+            if self.ui.show_raw_markdown {
                 "Markdown: raw view".to_string()
             } else {
                 "Markdown: rendered preview".to_string()

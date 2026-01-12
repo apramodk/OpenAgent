@@ -20,6 +20,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use app::App;
 use ui::draw;
+use ui_state::{Screen, Focus};
 
 fn main() -> io::Result<()> {
     // Parse command line args
@@ -71,16 +72,16 @@ fn run_app(
         if event::poll(std::time::Duration::from_millis(app.config.tick_rate_ms))? {
             match event::read()? {
                 Event::Key(key) => {
-                    match app.screen {
-                        app::Screen::Home => {
+                    match app.ui.screen {
+                        Screen::Home => {
                             // Any key transitions to chat
                             if key.code != KeyCode::Esc {
-                                app.screen = app::Screen::Chat;
+                                app.ui.screen = Screen::Chat;
 
                                 // Start backend when entering chat (unless offline mode)
                                 if !offline_mode && !app.backend_connected {
                                     if let Err(e) = app.start_backend() {
-                                        app.status_message =
+                                        app.ui.status_message =
                                             Some(format!("Backend error: {} (running offline)", e));
                                     }
                                 }
@@ -88,25 +89,25 @@ fn run_app(
                                 return Ok(());
                             }
                         }
-                        app::Screen::Chat => match key.code {
+                        Screen::Chat => match key.code {
                             KeyCode::Esc => {
                                 if app.showing_command_popup() {
                                     app.reset_command_selection();
-                                } else if app.input.is_empty() {
+                                } else if app.ui.input.is_empty() {
                                     return Ok(());
                                 } else {
-                                    app.input.clear();
+                                    app.ui.input.clear();
                                 }
                             }
                             KeyCode::Enter => {
-                                if app.showing_command_popup() && app.command_selection.is_some() {
+                                if app.showing_command_popup() && app.ui.command_selection.is_some() {
                                     app.apply_command_selection();
                                 } else {
                                     app.submit_message();
                                 }
                             }
                             KeyCode::Tab => {
-                                if app.showing_command_popup() && app.command_selection.is_some() {
+                                if app.showing_command_popup() && app.ui.command_selection.is_some() {
                                     // Tab applies command selection when popup is showing
                                     app.apply_command_selection();
                                 } else if key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -118,7 +119,7 @@ fn run_app(
                                 }
                             }
                             KeyCode::Backspace => {
-                                app.input.pop();
+                                app.ui.input.pop();
                                 app.reset_command_selection();
                             }
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -133,13 +134,13 @@ fn run_app(
                                             .filter(|c| *c != '\r')
                                             .map(|c| if c == '\n' { ' ' } else { c })
                                             .collect();
-                                        app.input.push_str(&filtered);
+                                        app.ui.input.push_str(&filtered);
                                         app.reset_command_selection();
                                     }
                                 }
                             }
                             KeyCode::Char(c) => {
-                                app.input.push(c);
+                                app.ui.input.push(c);
                                 app.reset_command_selection();
                             }
                             KeyCode::Up => {
@@ -166,18 +167,18 @@ fn run_app(
                 }
                 Event::Paste(text) => {
                     // Handle paste event (bracketed paste mode)
-                    if app.screen == app::Screen::Chat {
+                    if app.ui.screen == Screen::Chat {
                         // Filter out newlines for single-line input, or keep for multi-line
                         let filtered: String = text.chars()
                             .filter(|c| *c != '\r')
                             .map(|c| if c == '\n' { ' ' } else { c })
                             .collect();
-                        app.input.push_str(&filtered);
+                        app.ui.input.push_str(&filtered);
                         app.reset_command_selection();
                     }
                 }
                 Event::Mouse(mouse) => {
-                    if app.screen == app::Screen::Chat {
+                    if app.ui.screen == Screen::Chat {
                         let term_size = terminal.size()?;
                         let term_height = term_size.height;
                         let term_width = term_size.width;
@@ -188,7 +189,7 @@ fn run_app(
                         // Layout: 1px padding, sidebar_width, 1px gap, remaining split 50/50
                         let sidebar_end = 1 + app.config.sidebar_width + 1;
                         let chat_area_width = term_width.saturating_sub(sidebar_end + 2);
-                        let viz_start = if app.show_visualization {
+                        let viz_start = if app.ui.show_visualization {
                             sidebar_end + (chat_area_width / 2) + 1
                         } else {
                             term_width // Off-screen when not visible
@@ -198,11 +199,11 @@ fn run_app(
                             MouseEventKind::Down(MouseButton::Left) => {
                                 // Click to focus
                                 if mouse.row >= input_area_start {
-                                    app.focus = app::Focus::Input;
-                                } else if app.show_visualization && mouse.column >= viz_start {
-                                    app.focus = app::Focus::Visualization;
+                                    app.ui.focus = Focus::Input;
+                                } else if app.ui.show_visualization && mouse.column >= viz_start {
+                                    app.ui.focus = Focus::Visualization;
                                 } else if mouse.column > sidebar_end {
-                                    app.focus = app::Focus::Chat;
+                                    app.ui.focus = Focus::Chat;
                                 }
                             }
                             MouseEventKind::ScrollUp => {
@@ -219,7 +220,7 @@ fn run_app(
                             }
                             MouseEventKind::Moved => {
                                 // Handle hover in visualization area
-                                if app.show_visualization && mouse.column >= viz_start && mouse.row < input_area_start {
+                                if app.ui.show_visualization && mouse.column >= viz_start && mouse.row < input_area_start {
                                     // Calculate inner area (accounting for borders)
                                     let viz_width = term_width.saturating_sub(viz_start + 2) as f64;
                                     let viz_height = input_area_start.saturating_sub(4) as f64;
@@ -233,12 +234,12 @@ fn run_app(
 
                                         // Find point near cursor (with tolerance)
                                         let tolerance = 0.05; // 5% of view
-                                        app.hovered_point = app.find_point_at(norm_x, norm_y, tolerance);
+                                        app.ui.hovered_point = app.find_point_at(norm_x, norm_y, tolerance);
                                     } else {
-                                        app.hovered_point = None;
+                                        app.ui.hovered_point = None;
                                     }
                                 } else {
-                                    app.hovered_point = None;
+                                    app.ui.hovered_point = None;
                                 }
                             }
                             _ => {}
