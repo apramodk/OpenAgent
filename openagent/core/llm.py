@@ -2,13 +2,18 @@
 
 from abc import ABC, abstractmethod
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import AsyncIterator
 import os
 
 from openai import OpenAI, AzureOpenAI, AsyncAzureOpenAI
 from dotenv import load_dotenv
+
+# Use the same log file as handlers
+_log = logging.getLogger("openagent")
 
 
 @dataclass
@@ -177,6 +182,8 @@ class AzureOpenAIClient(LLMClient):
         **kwargs,
     ) -> AsyncIterator[str]:
         """Stream response chunks using native async client."""
+        _log.info(f"LLM.stream: model={self.model}, messages={len(messages)}, max_tokens={max_tokens}")
+
         params = {
             "model": self.model,
             "messages": messages,
@@ -187,8 +194,14 @@ class AzureOpenAIClient(LLMClient):
             params["temperature"] = temperature
         params.update(kwargs)
 
+        _log.info("LLM.stream: Calling Azure OpenAI API...")
         response = await self._async_client.chat.completions.create(**params)
-        
+        _log.info("LLM.stream: Got response object, iterating chunks...")
+
+        chunk_count = 0
         async for chunk in response:
             if chunk.choices and chunk.choices[0].delta.content:
+                chunk_count += 1
                 yield chunk.choices[0].delta.content
+
+        _log.info(f"LLM.stream: Finished, yielded {chunk_count} chunks")

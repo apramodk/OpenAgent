@@ -506,7 +506,7 @@ impl App {
                 }
                 Err(e) => {
                     self.activity.complete_last();
-                    self.ui.is_loading = false;
+                    self.ui.is_loading = false;  // Turn off loading on error
                     let error_msg = Message {
                         role: Role::System,
                         content: format!("Error: {}", e),
@@ -530,9 +530,11 @@ impl App {
             self.tokens.last_input = 50;
             self.tokens.last_output = 100;
             self.tokens.cost_usd += 0.001;
+
+            // Only turn off loading in offline mode - streaming will handle it via poll_stream
+            self.ui.is_loading = false;
         }
 
-        self.ui.is_loading = false;
         self.ui.scroll_offset = 0;
     }
 

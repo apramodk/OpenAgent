@@ -1,10 +1,20 @@
 """JSON-RPC method handlers."""
 
 import hashlib
+import logging
 from pathlib import Path
 from typing import Any, Callable, Awaitable
 
 from openagent.core.agent import Agent, AgentConfig
+
+# Set up file-based debug logging
+_log_path = Path.home() / ".openagent-debug.log"
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.FileHandler(_log_path, mode='w')]
+)
+_log = logging.getLogger("openagent")
 from openagent.memory.session import SessionManager, Session
 from openagent.telemetry.tokens import TokenTracker
 from openagent.rag.store import RAGStore, Chunk, ChunkMetadata
@@ -66,7 +76,10 @@ class Handlers:
 
     async def chat_send(self, params: dict) -> dict:
         """Process a chat message with streaming support."""
+        _log.info(f"chat_send called: stream={params.get('stream')}, msg_len={len(params.get('message', ''))}")
+
         if not self.agent:
+            _log.error("Agent not initialized")
             return {"error": "Agent not initialized"}
 
         message = params.get("message", "")
@@ -80,20 +93,29 @@ class Handlers:
             # Get RAG context if available
             rag_context = None
             if use_rag and self.rag_query:
+                _log.info("Getting RAG context...")
                 intent = self.agent.get_intent(message)
                 query = intent.query if intent else message
                 rag_context = self.rag_query.get_context_for_query(
                     query,
                     max_tokens=self.agent.context_manager.config.max_rag_tokens,
                 )
+                _log.info(f"RAG context retrieved: {len(rag_context) if rag_context else 0} chars")
 
             if stream and self._notify:
+                _log.info("Starting LLM stream...")
                 # Stream the response
                 full_response = ""
+                chunk_count = 0
                 async for chunk in self.agent.chat_stream(message, rag_context=rag_context):
                     full_response += chunk
+                    chunk_count += 1
+                    if chunk_count == 1:
+                        _log.info("First chunk received from LLM")
                     # Send chunk notification
                     await self._notify("chat.stream", {"chunk": chunk})
+
+                _log.info(f"Stream complete: {chunk_count} chunks, {len(full_response)} chars")
 
                 # Get token stats to include in done notification
                 done_payload: dict = {"done": True}
@@ -102,14 +124,20 @@ class Handlers:
                     done_payload["tokens"] = stats.to_dict()
 
                 # Send stream end notification with token stats
+                _log.info("Sending done notification...")
                 await self._notify("chat.stream", done_payload)
+                _log.info("Done notification sent!")
                 response = full_response
             else:
                 # Non-streaming fallback
+                _log.info("Using non-streaming chat...")
                 response = await self.agent.chat(message, rag_context=rag_context)
 
         except Exception as e:
+            import traceback
             error_msg = str(e)
+            _log.error(f"EXCEPTION in chat_send: {error_msg}")
+            _log.error(f"Traceback:\n{traceback.format_exc()}")
             # Provide helpful message for common issues
             if "PROJECT_ENDPOINT" in error_msg or "credential" in error_msg.lower():
                 return {
